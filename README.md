@@ -14,13 +14,14 @@ LLM 性价比 Pareto 前沿交互页 —— 一个 [Agent Skill](https://agentsk
 
 ```text
 /plugin marketplace add toRolex/llm-pareto-frontier
-/plugin install model-killing-line@llm-pareto-frontier
+/plugin install llm-pareto-frontier@llm-pareto-frontier
 ```
 
-装好后直接说「用 model-killing-line 重建斩杀线页面」或 `/model-killing-line`。
+装好后直接说「用 llm-pareto-frontier 重建斩杀线页面」，
+或 `/llm-pareto-frontier:llm-pareto-frontier`（plugin skill 带 namespace）。
 
-也可以不用 marketplace，直接把 `.agents/skills/model-killing-line/` 复制到
-`~/.claude/skills/model-killing-line/`。
+也可以不用 marketplace，直接把 `.agents/skills/llm-pareto-frontier/` 复制到
+`~/.claude/skills/llm-pareto-frontier/`，用 `/llm-pareto-frontier` 调用。
 
 ## 使用
 
@@ -50,7 +51,7 @@ node scripts/test-redesign-browser.mjs     # 真浏览器 38 项 UI/前沿/标�
 ## 仓库结构
 
 ```
-.agents/skills/model-killing-line/   # skill 本体（SKILL.md + scripts + 成品页 + 规格）
+.agents/skills/llm-pareto-frontier/  # skill 本体（SKILL.md + scripts + 成品页 + 规格）
 specs/                               # 业务规格 v3/v5/v6（定价语义权威来源）
 .claude-plugin/marketplace.json      # Claude Code plugin marketplace 清单
 ```
@@ -58,6 +59,12 @@ specs/                               # 业务规格 v3/v5/v6（定价语义权�
 定价业务引擎 `scripts/pricing-model.mjs` 为不改红线：四比例 100% 才应用、
 无效输入保留上次有效结果、固定倍率估算、每家可 API/套餐混合、两个 reset 独立、
 同模型 effort 共倍率、OpenAI 按套餐继承、其他厂商严格版本、cacheWrite 估算标识。
+
+## 致谢
+
+本项目基于 [orionpax1997/model-killing-line](https://github.com/orionpax1997/model-killing-line)
+开发。感谢原项目作者提供的 skill、榜单抓取与 Pareto 可视化基础；
+本仓库以 `llm-pareto-frontier` 为 skill 名称继续维护。
 
 ## License
 

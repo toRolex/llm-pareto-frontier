@@ -9,7 +9,7 @@
 
 # 第三方 skill（经 skills-lock.json 管理，非本仓库作品）
 .agents/skills/*
-!.agents/skills/model-killing-line/
+!.agents/skills/llm-pareto-frontier/
 skills-lock.json
 
 # jj 遮蔽文件

@@ -1,9 +1,9 @@
 ---
-name: model-killing-line
+name: llm-pareto-frontier
 description: 斩杀线 4D：抓 AA + Arena 榜，产出单文件 4D 交互页（3D/2D 视角、11 指标切换、Pareto 前沿三角面/发光线、effort 连线 hover、性能归一化），解读由 LLM 每次现看现写
 ---
 
-# model-killing-line
+# llm-pareto-frontier
 
 Zero-argument skill。抓取 Artificial Analysis 模型榜（AA 详情页 6 指标）与
 arena.ai 榜（text + agent 4 榜），构建出单文件 4D 交互页面
@@ -14,12 +14,12 @@ Output Tokens/Task ↓ · Tokens/s ↑。前沿语义 = 4D Pareto 前沿三角�
 
 ## 核心循环
 
-本 skill 目录可能是 `.claude/skills/model-killing-line`（symlink）或
-`.agents/skills/model-killing-line`——以下 `<SKILL>` 代指实际路径。所有命令以
+本 skill 目录可能是 `.claude/skills/llm-pareto-frontier`（symlink）或
+`.agents/skills/llm-pareto-frontier`——以下 `<SKILL>` 代指实际路径。所有命令以
 skill 目录为 cwd，只需要 node stdlib，无参数（阈值写在脚本里）：
 
 ```bash
-cd <SKILL>  # 例如 .agents/skills/model-killing-line/
+cd <SKILL>  # 例如 .agents/skills/llm-pareto-frontier/
 node scripts/fetch-aa.mjs      # → $TMPDIR/model-killing-line/aa-data.json（榜单行；无硬门槛，只求可解析）
 node scripts/fetch-catalog.mjs # → $TMPDIR/model-killing-line/aa-catalog.json（单个详情页内嵌全目录：6指标+tok+价，一次 curl）
 node scripts/fetch-metrics.mjs # → $TMPDIR/model-killing-line/aa-metrics.json（目录优先，逐页兜底；增量；失败 exitCode = 2）
@@ -68,7 +68,7 @@ OS temp dir（`os.tmpdir()/model-killing-line/`，可用 `MKL_DIR` env 覆盖）
 - `scripts/pricing-model.mjs` 是套餐 registry 与纯计算的唯一来源。所有倍率按用户提供的 SemiAnalysis 文章截图快照 2026-09-29，来源 https://newsletter.semianalysis.com/p/anthropic-subscriptions-offer-5x 。满额使用下固定倍率估算，非官方承诺；调整四比例不会重拟合倍率。
 - 每厂商独立选择 API / 套餐，默认 API，无总开关。有效单价为 `API ÷ 套餐倍率`，所有 effort 同倍率。OpenAI 除 Astra 外全部继承 Sol，含 Luna；其他厂商严格模型版本，不覆盖则保留 API。Sonnet Pro / Max5x 标拟合，Fable Pro 不含，Max 套餐最多半额度。Cursor 暂无 benchmark 点但保留选择器。
 - localStorage 仅保存有效四比例和套餐。恢复默认比例不重置套餐；所有厂商恢复 API 不重置比例。所有模式、$/task、3D/2D 前沿共用有效价格入口。tooltip 显示 API 原价、折算价、倍率、来源日期、拟合或继承、cache-write provenance。
-- 验证命令 `node scripts/test-pricing.mjs`。从项目根运行 `ego-browser nodejs < .agents/skills/model-killing-line/scripts/verify-pricing-browser.mjs` 做真实 file:// 浏览器验收，结果写 `/tmp/mkl-subscription-evidence/`。临时 HTML 提取 fixture 仅供离线回归，不称实时抓取数据。
+- 验证命令 `node scripts/test-pricing.mjs`。从项目根运行 `ego-browser nodejs < .agents/skills/llm-pareto-frontier/scripts/verify-pricing-browser.mjs` 做真实 file:// 浏览器验收，结果写 `/tmp/mkl-subscription-evidence/`。临时 HTML 提取 fixture 仅供离线回归，不称实时抓取数据。
 
 ## 解读：只在对话里写，不进页面
 

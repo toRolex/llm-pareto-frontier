@@ -9,12 +9,12 @@
   },
   "plugins": [
     {
-      "name": "model-killing-line",
+      "name": "llm-pareto-frontier",
       "description": "斩杀线 4D：抓取 Artificial Analysis + Arena 榜单，产出单文件 4D 交互页（3D/2D 视角、11 指标切换、Pareto 前沿三角面/发光线、effort 连线 hover、订阅等效价格），运行时零网络，file:// 可开",
       "source": "./",
       "strict": false,
       "skills": [
-        "./.agents/skills/model-killing-line"
+        "./.agents/skills/llm-pareto-frontier"
       ]
     }
   ]

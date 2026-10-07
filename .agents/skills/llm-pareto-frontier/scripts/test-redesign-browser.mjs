@@ -1,6 +1,6 @@
 // Run (Ego's embedded runtime does not inherit CLI environment):
 // export MKL_SPACE_ID=13
-// { printf 'process.env.MKL_SPACE_ID="%s";\n' "$MKL_SPACE_ID"; tee < .agents/skills/model-killing-line/scripts/test-redesign-browser.mjs; } | ego-browser nodejs
+// { printf 'process.env.MKL_SPACE_ID="%s";\n' "$MKL_SPACE_ID"; tee < .agents/skills/llm-pareto-frontier/scripts/test-redesign-browser.mjs; } | ego-browser nodejs
 // The owner serializes p1 access and finishes the shared TaskSpace, not this script.
 const fs = await import('node:fs/promises');
 const { default: assert } = await import('node:assert/strict');

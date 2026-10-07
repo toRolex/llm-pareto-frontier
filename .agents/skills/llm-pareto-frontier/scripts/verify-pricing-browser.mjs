@@ -15,7 +15,7 @@ const state = () => page.evaluate(() => ({
   stored: JSON.parse(localStorage.getItem('mkl-pricing-v1') || 'null'),
 }));
 const records = [];
-await page.goto(process.env.MKL_BROWSER_URL || 'file:///Users/rolex/Documents/Codes/githubProject/MyProject/llm-pareto-frontier/.agents/skills/model-killing-line/prototype-4d-3d.html');
+await page.goto(process.env.MKL_BROWSER_URL || 'file:///Users/rolex/Documents/Codes/githubProject/MyProject/llm-pareto-frontier/.agents/skills/llm-pareto-frontier/prototype-4d-3d.html');
 await page.click('text="订阅价格"');
 await page.click('#plans-api');
 await page.click('#mix-defaults');
