@@ -16,14 +16,17 @@ import { DEFAULT_MIX, createPricingEngine, cacheWriteQuote } from './pricing-mod
 const HERE = new URL('.', import.meta.url).pathname;
 const HTML = process.env.MKL_HTML_OUT ?? path.join(HERE, '..', 'prototype-4d-3d.html');
 const DIR = process.env.MKL_DIR ?? path.join(os.tmpdir(), 'model-killing-line');
-const metrics = readJson(path.join(DIR, 'aa-metrics.json'));
-const arena = readJson(path.join(DIR, 'arena-data.json'));
+const snapshot = process.env.MKL_SNAPSHOT === '1';
+const metrics = snapshot ? {} : readJson(path.join(DIR, 'aa-metrics.json'));
+const arena = snapshot ? {} : readJson(path.join(DIR, 'arena-data.json'));
 const prices = existsSync(path.join(DIR, 'aa-prices.json'))
   ? readJson(path.join(DIR, 'aa-prices.json'))
   : null;
 const pricingEngine = createPricingEngine();
 
 let html = readFileSync(HTML, 'utf8');
+const axisSource = await readFile(new URL('./axis-domain.mjs', import.meta.url), 'utf8');
+html = html.replace(/\/\/ AXIS_DOMAIN_RUNTIME[\s\S]*?\/\/ END_AXIS_DOMAIN_RUNTIME\n/, `// AXIS_DOMAIN_RUNTIME\n${axisSource.replace(/^export /gm, '')}// END_AXIS_DOMAIN_RUNTIME\n`);
 const pricingSource = await readFile(new URL('./pricing-model.mjs', import.meta.url), 'utf8');
 
 // JSON 读取统一走 readJson：解析失败时报出具体文件名，而不是裸 SyntaxError
@@ -35,6 +38,8 @@ function readJson(file) {
   }
 }
 
+let tokPatched = 0, pricePatched = 0, priceMissing = 0;
+if (!snapshot) {
 // --- METRICS_DATA / ARENA_DATA（幂等：已存在则替换）---
 const METRICS_BLOCK = `const METRICS_DATA = ${JSON.stringify(metrics)};\n`;
 const ARENA_BLOCK = `const ARENA_DATA = ${JSON.stringify(arena)};\n`;
@@ -73,7 +78,7 @@ const rows = aaRows.map(r => ({
   tok: null,
   speed: Number.isFinite(parseFloat(r.speed)) ? parseFloat(r.speed) : null,
 }));
-let tokPatched = 0, tokMissing = 0;
+let tokMissing = 0;
 for (const r of rows) {
   const t = metrics[r.model]?.tokPerTask;
   if (typeof t === 'number' && Number.isFinite(t) && t > 0) {
@@ -88,7 +93,8 @@ if (tokMissing) console.warn(`tok 缺测 ${tokMissing} 变体已置 null（详�
 // --- ROWS_RAW 价格重写为 token 单价（v5 spec）---
 // aa-prices.json（fetch-prices 产物）：base slug → {input, output, cacheHit}（$/M tok）。
 // 同模型各 effort 价格相同 → 变体全名剥括号 effort 后取 base slug 查表。
-// 综合价 = 0.043×input + 0.0007×output + 0.95×cacheHit（用户指定权重，token 构成占比）。
+// 综合价由 pricing-model.mjs 的 DEFAULT_MIX 加权（input 0.4 / cacheRead 96.7 / cacheWrite 2.6 / output 0.3，
+// cacheWrite 缺独立报价时按 cacheWriteQuote 估算）；此处不再硬编码权重。
 // 缺价的变体四价置 null（价格维缺测：隐藏，与 tok 缺测同策略），绝不留 cost per task 冒充。
 const SLUG_OVERRIDE_PRICES = {
   'Qwen3.8 Max (0902)': 'qwen3-8-max',
@@ -103,7 +109,7 @@ function baseSlugForPrices(name) {
   return name.replace(/\s*\([^)]*\)\s*$/, '').trim()
     .toLowerCase().replace(/\./g, '-').replace(/[^a-z0-9-]+/g, '-').replace(/^-+|-+$/g, '');
 }
-let pricePatched = 0, priceMissing = 0;
+
 for (const r of rows) {
   const p = prices?.[baseSlugForPrices(r.model)];
   if (p && [p.input, p.output, p.cacheHit].some(v => typeof v === 'number' && Number.isFinite(v) && v >= 0)) {
@@ -172,6 +178,8 @@ if (html.includes('const ROWS_RAW =')) {
   html = html.replace(/const ROWS_RAW = .*?\];\n/s, rowsBlock);
 } else {
   throw new Error('ROWS_RAW missing — 2D 管线退役后应始终存在');
+}
+
 }
 
 // --- 缺失 logo 补齐（源文件随 skill 提交在 prototype-assets/logos/，构建可复现）---

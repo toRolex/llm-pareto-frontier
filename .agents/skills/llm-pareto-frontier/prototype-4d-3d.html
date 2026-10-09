@@ -1189,19 +1189,19 @@
   #pricing-panel .plan-stops button { flex:1; border-radius:6px; }
   #pricing-panel .plan-stops button.on { background:var(--active); color:var(--active-fg); }
   #labels { position:fixed; inset:0; width:100%; height:100%; pointer-events:none; z-index:5; }
-  #labels text { font:11px -apple-system,sans-serif; fill:var(--fg); }
-  #labels rect { fill:var(--panel); stroke:var(--edge); rx:4; }
+  #labels text { font:12px -apple-system,sans-serif; }
+  #labels .effort { font-size:9px; }
   #labels line { stroke:var(--muted); stroke-width:.7; }
 </style>
 </head>
 <body>
 <header>
   <h1>斩杀线 4D — 帕累托前沿节点连面 · 3D/2D 视角切换（AA + Arena 真实数据）</h1>
-  <div class="note">四维：Metric（可切换，11 指标）↑ · Cost ↓ · Output Tokens/Task ↓ · Tokens/s ↑。墨绿面 = 4D 前沿三角面（虚线描边）；2D 视角虚线 = 该视角两维重算的 Pareto 前沿。轴反向：原点=最差，最远处=0。点色 = 厂商品牌色；实线 = 同模型 effort 连线；2D 标牌 = 前沿 + 指标 Top10。</div>
+  <div class="note">四维：Metric（可切换，11 指标）↑ · Cost ↓ · Output Tokens/Task ↓ · Tokens/s ↑。墨绿面 = 4D 前沿三角面（虚线描边）；2D 视角实线 = 该视角两维重算的 Pareto 前沿。轴反向：原点=最差，最远处=0。点色 = 厂商品牌色；实线 = 同模型 effort 连线；2D 标牌覆盖全部可见模型，同名模型只标一次名称（effort 次行）。</div>
 </header>
 <div id="theme-switch" aria-label="主题"><button data-theme="dark">暗</button><button data-theme="light">亮</button></div>
 <div class="chart" id="chart"></div>
-<svg id="labels" aria-label="前沿与 Top10 标牌"></svg>
+<svg id="labels" aria-label="全模型标牌"></svg>
 <div id="legend"></div>
 <div id="state"></div>
 <div id="cfgpop" class="hidden">
@@ -1308,11 +1308,8 @@ const SUBSCRIPTION_REGISTRY = Object.freeze({
   },
 });
 
-for (const provider of Object.values(SUBSCRIPTION_REGISTRY)) {
-  provider.source = "SemiAnalysis 文章截图快照；满额使用下的固定倍率估算，非官方承诺。";
-  provider.sourceDate = "2026-09-29";
-  provider.sourceUrl = "https://newsletter.semianalysis.com/p/anthropic-subscriptions-offer-5x";
-}
+// 各 provider 自带 source/sourceDate（OpenAI/Anthropic 另有 sourceUrl）；
+// 不得用循环统一覆盖——会把 Task-provided 声明抹成 Anthropic 文章来源（cost-check 发现的回归点）
 
 function cacheWriteQuote(input, creator) {
   if (!Number.isFinite(input) || input < 0) return { rate: null, source: null };
@@ -1639,31 +1636,38 @@ const visible = () => MODELS.filter(m => selected.get(baseKey(m.model))?.has(eff
 // 默认只勾每家最新一批（build-proto 打 latest 标；旧批默认不勾，Configs 可勾回）
 for (const m of MODELS) if (m.latest === false) selected.get(baseKey(m.model))?.clear();
 
-// ---------- 值域（原点=最差，最远处略超数据最小值 → linear 时远端=0）----------
-// tok 只收正有限值：null/0 行无该维数据，混进 Math.min 会把 tokMin 拉成 0，
-// log 投影分母变 -Infinity，全模型 z 塌缩（v3.1 修复的回归点）。
-// cost 维取当前价格模式（costOf）；上限取整到下一个 1-2-5 刻度（27.2k→30k），
-// 刻度不被截在轴顶（v5 spec）。DOM.cost 是 let：切换价格模式时 recomputeDom() 重算。
-const niceCeil = v => { const k = Math.pow(10, Math.floor(Math.log10(v))); for (const m of [1, 2, 5, 10]) if (m * k >= v - 1e-12) return m * k; };
-const recomputeDom = () => {
-  const cs = MODELS.map(costOf).filter(v => typeof v === 'number' && Number.isFinite(v) && v > 0);
-  const tk = MODELS.map(m => m.tok).filter(v => typeof v === 'number' && Number.isFinite(v) && v > 0);
-  DOM.costMax = cs.length ? niceCeil(Math.max(...cs)) : 1; costMinRaw = cs.length ? Math.min(...cs) * 0.8 : 0.01;
-  DOM.tokMax = niceCeil(Math.max(...tk));  DOM.tokMin = Math.min(...tk) * 0.9;
-};
-let costMinRaw;
-const DOM = { idxMin: 0, idxMax: 100, costMax: 1, costMin: 0.01, tokMax: 1, tokMin: 1 }; // 占位；启动时 recomputeDom
-recomputeDom();
-Object.defineProperty(DOM, 'costMin', { get: () => costMinRaw }); // 保持 costMin 读取口不变
-
-// ---------- 归一化（反向轴：0=原点=最差，1=远端=最好/0 值）----------
-const W = { w: 10, h: 10, d: 5 }; // x=cost 域宽, z=tok 域深（两横轴等长）, y(竖)=metric 域高
+// AXIS_DOMAIN_RUNTIME
+function createAxisDomain(values, scale = 'lin') {
+  const finite = values.filter(Number.isFinite);
+  const lo = finite.length ? Math.min(...finite) : 0;
+  const hi = finite.length ? Math.max(...finite) : 1;
+  const positive = finite.filter(v => v > 0);
+  const pivot = positive.length ? Math.min(...positive) : 1;
+  const logarithmic = scale === 'log';
+  const zeroSafe = lo <= 0;
+  const transform = logarithmic
+    ? zeroSafe ? v => Math.log1p(v / pivot) : v => Math.log(v)
+    : v => v;
+  const inverse = logarithmic
+    ? zeroSafe ? v => Math.expm1(v) * pivot : v => Math.exp(v)
+    : v => v;
+  const low = transform(lo), high = transform(hi);
+  const pad = high > low ? (high - low) * 0.06 : logarithmic ? Math.max(Math.abs(high) * 0.06, 0.1) : Math.abs(high) * 0.06 || 1;
+  const min = inverse(lo >= 0 && (!logarithmic || zeroSafe) ? Math.max(0, low - pad) : low - pad);
+  const max = inverse(high + pad);
+  return {
+    min, max,
+    project: value => (transform(value) - transform(min)) / (transform(max) - transform(min)),
+  };
+}
+// END_AXIS_DOMAIN_RUNTIME
+let axes;
+const DOM = {};
+const W = { w: 10, h: 10, d: 5 };
 const xn = {
-  cost: v => v === 0 ? 1 : S.costScale === "log" ? (Math.log(DOM.costMax) - Math.log(v)) / (Math.log(DOM.costMax) - Math.log(DOM.costMin))
-                                   : (DOM.costMax - v) / (DOM.costMax - DOM.costMin),
-  tok:  v => S.tokScale  === "log" ? (Math.log(DOM.tokMax)  - Math.log(v))  / (Math.log(DOM.tokMax)  - Math.log(DOM.tokMin))
-                                   : (DOM.tokMax - v) / (DOM.tokMax - DOM.tokMin),
-  idx:  v => (v - DOM.idxMin) / (DOM.idxMax - DOM.idxMin),
+  cost: v => 1 - axes.cost.project(v),
+  tok: v => 1 - axes.tok.project(v),
+  idx: v => axes.idx.project(v),
 };
 // 纵轴取当前指标值（killFront 返回的行带 val；普通行带 index）——统一走 m.val ?? m.index
 // tok 缺测行钉在 tok 远端（最优侧）不参与 log 投影，NaN 会污染 mesh/连线几何
@@ -1724,7 +1728,7 @@ const camera2 = new THREE.OrthographicCamera(-1, 1, 1, -1, 0.1, 100);
 let cam = camera; // 当前活动相机（3D = 透视，2D = 正交）
 scene.add(new THREE.AmbientLight(0xffffff, 0.9));
 const dl = new THREE.DirectionalLight(0xffffff, 0.6); dl.position.set(6, 10, 8); scene.add(dl);
-addEventListener("resize", () => { sync2D(); camera.aspect = innerWidth/innerHeight; camera.updateProjectionMatrix(); renderer.setSize(innerWidth, innerHeight); });
+addEventListener("resize", () => { sync2D(); camera.aspect = innerWidth/innerHeight; camera.updateProjectionMatrix(); renderer.setSize(innerWidth, innerHeight); labelSignature = ""; if (S.view !== "3d") updateLabels(); });
 
 function textSprite(txt, { size = 28, color = palette().text, scale = 1 } = {}) {
   const cv = document.createElement("canvas"); const ctx = cv.getContext("2d");
@@ -1748,29 +1752,21 @@ let iconScale = 1;     // slider 乘数（0.5–3）
 
 function buildWorld() {
   const mi = METRICS[S.metric];
-  // 按当前指标重算纵轴值域（spec：切指标后 DOM.idxMin/idxMax 跟随；归一化先算 max 再投影）
-  const rawVals = visible().map(mi.get).filter(v => v !== null && v !== undefined);
+  const valid = visible().filter(m => Number.isFinite(mi.get(m)) && Number.isFinite(m.tok) && m.tok > 0);
+  const rawVals = valid.map(mi.get);
   perfMax = rawVals.length ? Math.max(...rawVals) : 100;
-  const vals = rawVals.map(perfVal);
-  if (S.perfScale === "norm") {
-    // 归一化 mode：数学上限恒为 100（最强可见行=100），纵轴固定 0–100 无 headroom
-    // ——ceil(hi+pad) 会把顶部顶到 120，属错误刻度（用户反馈修复）
-    DOM.idxMin = 0; DOM.idxMax = 100; DOM.idxStep = 10;
-  } else if (vals.length) {
-    const lo = Math.min(...vals), hi = Math.max(...vals);
-    const pad = Math.max((hi - lo) * 0.08, Math.abs(hi) * 0.02, 1e-6);
-    // 刻度步长按值域自适应：0-100 榜用 10/20，Arena 0-1 榜用 0.05
-    const span = hi - lo + 2 * pad;
-    const step = span > 40 ? 20 : span > 12 ? 10 : span > 2 ? 1 : span > 0.4 ? 0.2 : 0.05;
-    DOM.idxMin = Math.floor((lo - pad) / step) * step;
-    DOM.idxMax = Math.ceil((hi + pad) / step) * step;
-    DOM.idxStep = step;
-  } else { DOM.idxMin = 0; DOM.idxMax = 60; DOM.idxStep = 10; }
-
-  // 缺指标的行直接隐藏；全部行挂上当前指标值 val（连线/点/2D 前沿统一用）。
-  // val 经 perfVal 归一化层，只服务 y 投影读数；killFront 内部另行取原始值判定前沿
-  // （判定与 perfScale 解耦，见 killFront 注释）。
-  const rows = visible().filter(m => mi.get(m) !== null && mi.get(m) !== undefined).map(m => ({ ...m, val: perfVal(mi.get(m)) }));
+  if (perfMax === 0) perfMax = 1;
+  const rows = valid.map(m => ({ ...m, val: perfVal(mi.get(m)) }));
+  axes = {
+    cost: createAxisDomain(rows.map(costOf), S.costScale),
+    tok: createAxisDomain(rows.map(m => m.tok), S.tokScale),
+    idx: createAxisDomain(rows.map(m => m.val)),
+  };
+  Object.assign(DOM, {
+    costMin: axes.cost.min, costMax: axes.cost.max,
+    tokMin: axes.tok.min, tokMax: axes.tok.max,
+    idxMin: axes.idx.min, idxMax: axes.idx.max,
+  });
   const front = killFront(rows);
   const frontSet = new Set(front);
   const group = new THREE.Group();
@@ -1788,7 +1784,7 @@ function buildWorld() {
   const linTicks = (lo, hi) => {
     const raw = (hi - lo) / 5;
     const mag = Math.pow(10, Math.floor(Math.log10(raw)));
-    const step = [1, 2, 2.5, 5, 10].map(m => m * mag).find(s => hi / s <= 8) ?? 10 * mag;
+    const step = [1, 2, 2.5, 5, 10].map(m => m * mag).find(s => (hi - lo) / s <= 8) ?? 10 * mag;
     const ticks = [];
     for (let v = Math.ceil(lo / step) * step; v <= hi; v += step) ticks.push(+v.toFixed(6));
     return ticks;
@@ -1802,9 +1798,9 @@ function buildWorld() {
     }
     return ticks;
   };
-  const costTicks = S.costScale === "log"
+  const costTicks = S.costScale === "log" && DOM.costMin > 0
     ? logTicks(DOM.costMin, DOM.costMax)
-    : linTicks(0, DOM.costMax);
+    : linTicks(DOM.costMin, DOM.costMax);
   const tokTicks = S.tokScale === "log"
     ? logTicks(DOM.tokMin, DOM.tokMax)
     : linTicks(DOM.tokMin, DOM.tokMax);
@@ -1824,10 +1820,10 @@ function buildWorld() {
     const sp = textSprite(v === 0 ? "0" : fmtTok(v), { size: S.view === "3d" ? 32 : 24, scale: S.view === "3d" ? 1.25 : 1 });
     sp.position.set(-0.45, -0.25, xn.tok(v)*W.h); sp.userData.axis = "tok"; group.add(sp);
   }
-  const idxStep = DOM.idxStep ?? 10;
+  const idxTicks = linTicks(DOM.idxMin, DOM.idxMax);
   for (const v of costTicks) { const x=xn.cost(v)*W.w; line(V3(x,0,0),V3(x,W.d,0),gridMat,"cost"); }
   for (const v of tokTicks) { const z=xn.tok(v)*W.h; line(V3(0,0,z),V3(0,W.d,z),gridMat,"tok"); }
-  for (let v = DOM.idxMin; v <= DOM.idxMax; v += idxStep) {
+  for (const v of idxTicks) {
     const y=xn.idx(v)*W.d;
     line(V3(0,y,0),V3(W.w,y,0),gridMat,"cost");
     line(V3(0,y,0),V3(0,y,W.h),gridMat,"tok");
@@ -1897,21 +1893,18 @@ function buildWorld() {
     for (const ln of lines) { ln.userData.baseKey = core.userData.baseKey; (effortLines.get(core.userData.baseKey) ?? effortLines.set(core.userData.baseKey, []).get(core.userData.baseKey)).push(ln); }
   }
 
-  // --- 2D 前沿连线：按视角两维重算的 2D Pareto 前沿，单条虚线 ---
-  // 虚线 = "前沿边界"的语义区分（数据连线是实线）；WebGL linewidth 恒为 1，
-  // LineDashedMaterial 需 computeLineDistances 计算线段参数。每条线独立材质。
-  const dashedMat = () => {
-    const m = new THREE.LineDashedMaterial({ color: 0x487265, transparent: true, opacity: 0.9, dashSize: 0.18, gapSize: 0.12 });
-    return m;
-  };
+  // --- 2D 前沿连线：按视角两维重算的 2D Pareto 前沿，单条实线 ---
+  // 实线加高对比色 = 前沿边界必须一眼可见（旧版浅绿虚线在黑底上不可辨）；
+  // 颜色随主题取自 palette，主题切换会 rebuild 重建材质。WebGL linewidth 恒为 1。
+  const frontColor = () => theme === "dark" ? 0x66d9a8 : 0x2e7358;
+  const solidMat = () => new THREE.LineBasicMaterial({ color: frontColor(), transparent: true, opacity: 0.95 });
   const frontLine = (axis, off) => {
     const dims = axis === "cost" ? [{key:"cost",dir:-1},{key:"val",dir:1}] : [{key:"tok",dir:-1},{key:"val",dir:1}];
     const pts2 = pareto(rows.map(m => ({...m,cost:costOf(m)})), dims)
       .filter(m => typeof m.tok === 'number' && Number.isFinite(m.tok) && m.tok > 0) // tok 缺测行不进 2D 连线
       .sort((a, b) => axis === "cost" ? costOf(a) - costOf(b) : a.tok - b.tok)
       .map(m => { const w = toWorld(m); if (axis === "cost") w.z = off; else w.x = off; return w; });
-    const l = new THREE.Line(new THREE.BufferGeometry().setFromPoints(pts2), dashedMat());
-    l.computeLineDistances(); // LineDashedMaterial 必需，否则退化为实线
+    const l = new THREE.Line(new THREE.BufferGeometry().setFromPoints(pts2), solidMat());
     l.userData.frontLine = true; group.add(l);
     return { rep: l, lines: [l] };
   };
@@ -2395,7 +2388,6 @@ function applyMixDraft() {
   updatePricing();
 }
 function updatePricing() {
-  recomputeDom();
   rebuild({ keepCamera: true });
 }
 renderPricingPanel();
@@ -2436,8 +2428,7 @@ PRICE_MODES.forEach(({ key, label }) => {
   const b = mkBtn(label, { price: key });
   b.onclick = () => {
     S.priceMode = key;
-    recomputeDom(); // cost 值域随模式变
-    [...bar.querySelectorAll("button[data-price]")].forEach(x => x.classList.toggle("on", x.dataset.price === key));
+      [...bar.querySelectorAll("button[data-price]")].forEach(x => x.classList.toggle("on", x.dataset.price === key));
     rebuild({ keepCamera: true });
   };
 });
@@ -2450,7 +2441,6 @@ const ptBtn = mkBtn("$/task", { pertask: "1" });
 ptBtn.onclick = () => {
   S.perTask = !S.perTask;
   ptBtn.classList.toggle("on", S.perTask);
-  recomputeDom(); // $/task 量级比单价大几个数量级，值域重算
   rebuild({ keepCamera: true });
 };
 bar.insertAdjacentHTML("beforeend", `<span class="sep"></span>`);
@@ -2489,7 +2479,7 @@ function updateLegend() {
   const firstCreator = world.rows[0] ? world.rows[0].creator : "";
   const effCreator = (world.rows.find((m, i, arr) => arr.findIndex(x => x.creator === m.creator) === i) || {}).creator || "";
   setHTML(document.getElementById("legend"), `
-    <div class="row"><span class="ln" style="border-color:#487265; border-top-style:dashed;"></span>Pareto frontier（2D 虚线）</div>
+    <div class="row"><span class="ln" style="border-color:#66d9a8;"></span>Pareto frontier（2D 实线）</div>
     <div class="row"><span class="ln" style="border-color:#487265; border-top-style:dashed;"></span>4D 前沿边界（3D 虚线描边）</div>
     <div class="row"><span class="sw" style="background:${creatorColor(firstCreator)}"></span>模型（厂商色点 · hover 显示图标）</div>
     <div class="row"><span class="ln" style="border-color:${creatorColor(effCreator)}; border-top-width:3px;"></span>同模型 effort 连线（加粗）</div>`);
@@ -2499,37 +2489,74 @@ function updateLegend() {
 const labelLayer = document.getElementById("labels");
 let labelSignature = "";
 function updateLabels() {
-  if (!world || S.view === "3d" || flight) { labelLayer.replaceChildren(); labelSignature = ""; return; }
+  if (!world || S.view === "3d" || flight) { labelLayer.replaceChildren(); labelSignature = ""; window.__labelCoverage = null; return; }
   const dims = S.view === "cost" ? [{key:"cost",dir:-1},{key:"val",dir:1}] : [{key:"tok",dir:-1},{key:"val",dir:1}];
-  const front2 = pareto(world.rows.map(m=>({cost:costOf(m),tok:m.tok,val:m.val,src:m})), dims).map(m=>m.src);
-  const top = [...world.rows].sort((a,b)=>b.val-a.val).slice(0,10);
-  const selectedLabels = [...new Set([...front2,...top])];
-  const projected = selectedLabels.map(m => { const p=toWorld(m).project(camera2); return {m,x:(p.x+1)*innerWidth/2,y:(1-p.y)*innerHeight/2}; });
+  const front2 = new Set(pareto(world.rows.map(m=>({cost:costOf(m),tok:m.tok,val:m.val,src:m})), dims).map(m=>m.src));
+  // 覆盖全部可见点；名称属 baseModel（每模型只标一次），effort 属点。
+  // 优先级序（前沿在前，val 降序）决定放置顺序；名称点被避碰丢弃时顺延给同模型下一个点。
+  const items = world.rows.map(m => ({m, front: front2.has(m)}));
+  items.sort((a,b) => (b.front - a.front) || (b.m.val - a.m.val));
+  const projected = items.map(({m,front}) => { const p=toWorld(m).project(camera2); return {m,front,x:(p.x+1)*innerWidth/2,y:(1-p.y)*innerHeight/2}; });
   const signature = JSON.stringify([theme,innerWidth,innerHeight,projected.map(p=>[p.m.model,p.x,p.y])]);
   if (signature === labelSignature) return;
   labelSignature = signature; labelLayer.replaceChildren();
   const legendBox=document.getElementById("legend").getBoundingClientRect();
   const ns="http://www.w3.org/2000/svg", occupied=[{x:legendBox.x,y:legendBox.y,w:legendBox.width,h:legendBox.height}];
   const make = (tag,attrs) => { const n=document.createElementNS(ns,tag); for(const [k,v] of Object.entries(attrs)) n.setAttribute(k,v); return n; };
-  const ceiling = document.getElementById("bar").getBoundingClientRect().top-12;
-  for (const {m,x,y} of projected) {
+  // 上界同时受底栏与状态条约束：状态条区域整体不进标签区（避免时序依赖的 occupied 竞态）
+  const barBox = document.getElementById("bar").getBoundingClientRect();
+  const stateTop = document.getElementById("state").getBoundingClientRect().top;
+  const ceiling = Math.min(barBox.top - 12, stateTop > 0 ? stateTop - 8 : Infinity);
+  const allBase = [...new Set(world.rows.map(m => baseKey(m.model)))];
+  const namePending = new Set(allBase);
+  // 轴刻度/轴标题 sprite 与状态条占屏：逐 sprite 矩形避让（轴侧间隙仍可用于放标签）
+  const pxPerWorld = innerHeight / (camera2.top - camera2.bottom);
+  world.group.traverse(o => {
+    if (!o.isSprite || !o.userData.axis) return;
+    const p = o.position.clone().project(camera2);
+    const cx = (p.x + 1) * innerWidth / 2, cy = (1 - p.y) * innerHeight / 2;
+    const hw = o.scale.x * pxPerWorld / 2 + 10, hh = o.scale.y * pxPerWorld / 2 + 8;
+    occupied.push({ x: cx - hw, y: cy - hh, w: hw * 2, h: hh * 2 });
+  });
+  const stateBox = document.getElementById("state").getBoundingClientRect();
+  if (stateBox.height > 0) occupied.push({ x: stateBox.x, y: stateBox.y, w: stateBox.width, h: stateBox.height });
+  for (const {m,x,y,front} of projected) {
     if(x<0||x>innerWidth||y<85||y>ceiling) continue;
-    const g=make("g",{"data-model":m.model,"data-front":front2.includes(m)}), text=make("text",{x:0,y:0});
-    text.textContent=m.model; g.append(text); labelLayer.append(g);
+    const bk = baseKey(m.model), withName = namePending.has(bk);
+    const g=make("g",{"data-model":m.model,"data-front":front}), text=make("text",{x:0,y:0});
+    text.setAttribute("fill", creatorColor(m.creator));
+    if (withName) {
+      const name=make("tspan",{x:0,dy:0}), effort=make("tspan",{x:0,dy:13,class:"effort"});
+      name.textContent = effortOf(m.model)==="BASE" ? m.model : bk;
+      effort.textContent = effortOf(m.model);
+      text.append(name,effort);
+    } else {
+      const effort=make("tspan",{x:0,dy:0,class:"effort"});
+      effort.textContent = effortOf(m.model);
+      text.append(effort);
+    }
+    g.append(text); labelLayer.append(g);
     const bb=text.getBBox(), w=bb.width+12,h=bb.height+8;
+    // 名称标签承担覆盖责任，给更宽的搜索（4 列 × 200 环）；仍放不下才丢，
+    // 丢名计入 __labelCoverage.dropped（hover tooltip 是替代入口）
+    const dxs = withName ? [10,-w-10,44,-w-44] : [10,-w-10];
     let box=null;
-    for(let ring=0;ring<100&&!box;ring++) for(const sign of [1,-1]) {
-      const bx=Math.max(12,Math.min(innerWidth-w-12,x+10)), by=Math.max(90,Math.min(ceiling-h,y-8+sign*ring*(h+3)));
-      const b={x:bx,y:by,w,h};
-      if(!occupied.some(o=>b.x<o.x+o.w+4&&b.x+b.w+4>o.x&&b.y<o.y+o.h+3&&b.y+b.h+3>o.y)) {box=b;break;}
+    for(const dx of dxs) { if(box) break;
+      for(let ring=0;ring<200&&!box;ring++) for(const sign of [1,-1]) {
+        const bx=Math.max(12,Math.min(innerWidth-w-12,x+dx)), by=Math.max(90,Math.min(ceiling-h,y-8+sign*ring*(h+3)));
+        const b={x:bx,y:by,w,h};
+        if(!occupied.some(o=>b.x<o.x+o.w+4&&b.x+b.w+4>o.x&&b.y<o.y+o.h+3&&b.y+b.h+3>o.y)) {box=b;break;}
+      }
     }
     if(!box) { g.remove(); continue; }
+    if (withName) namePending.delete(bk);
     occupied.push(box);
     const ln=make("line",{x1:x,y1:y,x2:box.x,y2:box.y+box.h/2});
-    const rect=make("rect",{x:box.x,y:box.y,width:w,height:h});
-    g.prepend(rect); if(Math.abs(box.y-y)>h)g.prepend(ln);
-    text.setAttribute("x",box.x+6); text.setAttribute("y",box.y+4-bb.y);
+    if(Math.abs(box.y-y)>h)g.prepend(ln);
+    text.setAttribute("transform",`translate(${box.x+6},${box.y+4-bb.y})`);
   }
+  // 覆盖率审计：named = 已标注名称的 base 模型；dropped = 避碰/裁剪丢弃名称的 base 模型
+  window.__labelCoverage = { named: allBase.filter(bk => !namePending.has(bk)), dropped: [...namePending] };
 }
 function setTheme(next) {
   theme=next; document.documentElement.dataset.theme=theme;

@@ -86,11 +86,7 @@ export const SUBSCRIPTION_REGISTRY = Object.freeze({
   },
 });
 
-for (const provider of Object.values(SUBSCRIPTION_REGISTRY)) {
-  provider.source = "SemiAnalysis 文章截图快照；满额使用下的固定倍率估算，非官方承诺。";
-  provider.sourceDate = "2026-09-29";
-  provider.sourceUrl = "https://newsletter.semianalysis.com/p/anthropic-subscriptions-offer-5x";
-}
+// 各 provider 自带 source/sourceDate（OpenAI/Anthropic 另有 sourceUrl）；不得用循环统一覆盖。
 
 export function cacheWriteQuote(input, creator) {
   if (!Number.isFinite(input) || input < 0) return { rate: null, source: null };
