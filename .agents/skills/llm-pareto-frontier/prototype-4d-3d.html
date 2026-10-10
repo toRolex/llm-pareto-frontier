@@ -1192,17 +1192,43 @@
   #labels text { font:12px -apple-system,sans-serif; }
   #labels .effort { font-size:9px; }
   #labels line { stroke:var(--muted); stroke-width:.7; }
+  body { min-width:0; }
+  .chart { inset:96px 324px calc(var(--bar-height,139px) + 44px) 16px; }
+  header { right:324px; padding:16px 24px; }
+  header h1 { font-size:18px; }
+  header .note { font-size:11px; }
+  #sidebar { position:fixed; top:96px; right:16px; bottom:calc(var(--bar-height,139px) + 16px); width:292px; display:flex; flex-direction:column; gap:12px; overflow:auto; }
+  #tip { position:relative; display:block !important; left:auto !important; top:auto !important; width:100%; min-width:0; max-width:none; flex:1; box-shadow:none; overflow-wrap:anywhere; }
+  #legend { position:relative; top:auto; right:auto; width:100%; }
+  #state { right:324px; left:20px; }
+  #labels, #front-fill { position:fixed; inset:auto; pointer-events:none; overflow:hidden; }
+  #front-fill { z-index:2; }
+  #front-fill polygon { fill:#a8cfc1; fill-opacity:.16; }
+  #labels { z-index:5; }
+  .aliases { display:flex; flex-direction:column; gap:4px; margin-top:10px; }
+  .aliases button { color:var(--fg); background:var(--section); border:1px solid var(--edge); border-radius:6px; padding:5px; text-align:left; cursor:pointer; }
+  @media (max-width:800px) {
+    header { right:0; padding:10px 16px; }
+    header .note { display:none; }
+    #theme-switch { top:48px; }
+    .chart { inset:96px 12px calc(var(--bar-height,139px) + 212px) 12px; }
+    #sidebar { top:auto; left:12px; right:12px; width:auto; height:164px; bottom:calc(var(--bar-height,139px) + 12px); flex-direction:row; }
+    #sidebar #legend { width:42%; flex-shrink:0; font-size:10px; }
+    #sidebar #tip { overflow:auto; padding:8px; }
+    #state { right:12px; bottom:calc(var(--bar-height,139px) + 180px); font-size:10px; }
+  }
 </style>
 </head>
 <body>
 <header>
-  <h1>斩杀线 4D — 帕累托前沿节点连面 · 3D/2D 视角切换（AA + Arena 真实数据）</h1>
-  <div class="note">四维：Metric（可切换，11 指标）↑ · Cost ↓ · Output Tokens/Task ↓ · Tokens/s ↑。墨绿面 = 4D 前沿三角面（虚线描边）；2D 视角实线 = 该视角两维重算的 Pareto 前沿。轴反向：原点=最差，最远处=0。点色 = 厂商品牌色；实线 = 同模型 effort 连线；2D 标牌覆盖全部可见模型，同名模型只标一次名称（effort 次行）。</div>
+  <h1>斩杀线 4D · 完整非支配配置与三轴阶梯包络</h1>
+  <div class="note">Metric ↑ · Cost ↓ · Output Tokens/Task ↓ · Tokens/s ↑。墨绿面是当前三轴已观测支配域的阶梯边界，不代表连续可实现模型。完整 4D 非支配配置描边保留。2D 浅色区为超出该预算已观测最佳性能的未达区域。</div>
 </header>
 <div id="theme-switch" aria-label="主题"><button data-theme="dark">暗</button><button data-theme="light">亮</button></div>
 <div class="chart" id="chart"></div>
-<svg id="labels" aria-label="全模型标牌"></svg>
-<div id="legend"></div>
+<svg id="front-fill" aria-label="超出已观测前沿区域"></svg>
+<svg id="labels" aria-label="悬停模型标牌"></svg>
+<aside id="sidebar"><div id="legend"></div><div id="tip"></div></aside>
 <div id="state"></div>
 <div id="cfgpop" class="hidden">
   <div class="cfg-h">Configs <span style="flex:1"></span><a id="cfg-all">Select all</a><a id="cfg-none">Clear</a></div>
@@ -1211,7 +1237,6 @@
 </div>
 <div id="pricing-panel" class="hidden" aria-label="Subscription pricing settings"></div>
 <div id="storage-warning" role="status"></div>
-<div id="tip"></div>
 <div id="bar"></div>
 
 <script>
@@ -1555,27 +1580,84 @@ function pareto(rows, dims) {
     b !== a && dims.every(d => d.dir > 0 ? b[d.key] >= a[d.key] : b[d.key] <= a[d.key]) &&
                dims.some(d => d.dir > 0 ? b[d.key] > a[d.key] : b[d.key] < a[d.key])));
 }
-// 斩杀线前沿：4D 帕累托最优 ∧（∈ cost×metric 前沿 ∨ ∈ tok×metric 前沿）；index 维按当前指标
-// speed 缺失 = 不可占便宜（-Inf；null 恒 false 比较会等效 +∞）
-// 前沿判定用原始指标值（rawVal），不吃归一化层——线性归一虽不改支配关系，
-// 但 spec 要求判定与 perfScale 在代码上不耦合。返回元素经 .src 映射回传入 rows 的原引用
-// ——frontSet 靠 identity 命中 sprite 的 userData.model
-function killFront(rows) {
-  const mi = METRICS[S.metric];
-  // cost 维经 costOf 取当前价格模式值（v5 spec：切换价格模式 → 前沿整体重算）
-  const D2cost = [{key:"cost",dir:-1},{key:"val",dir:1}];
-  const D2tok  = [{key:"tok",dir:-1},{key:"val",dir:1}];
-  const D4m = [{key:"cost",dir:-1},{key:"val",dir:1},{key:"tok",dir:-1},{key:"speed",dir:1}];
-  const withVal = rows
-    .filter(m => !(mi.get(m) === null || mi.get(m) === undefined))
-    .map(m => ({ ...m, cost: costOf(m), val: mi.get(m),
-      speed: (m.speed === null || m.speed === undefined) ? -Infinity : m.speed,
-      tok:   (m.tok === null || m.tok === undefined) ? Infinity : m.tok, // tok 缺测 = 不可占便宜（tok 维最差）
-      src: m }));
-  const c2cost = new Set(pareto(withVal, D2cost));
-  const c2tok  = new Set(pareto(withVal, D2tok));
-  return pareto(withVal, D4m).filter(m => c2cost.has(m) || c2tok.has(m)).map(m => m.src);
+// FRONTIER_DOMAIN_RUNTIME
+function computeFrontier(rows, project) {
+  const dominates = (a, b, axes) => axes.every(f => f(a) >= f(b)) && axes.some(f => f(a) > f(b));
+  const pareto = axes => rows.filter(b => !rows.some(a => dominates(a, b, axes)));
+  const cost = r => -r.cost, tok = r => -r.tok, val = r => r.val;
+  const speed = r => r.speed ?? -Infinity;
+  const front4 = pareto([cost, tok, val, speed]);
+  const front3 = pareto([cost, tok, val]);
+  const front2Cost = pareto([cost, val]);
+  const front2Tok = pareto([tok, val]);
+  const points = rows.map(row => ({ row, xyz: project(row) }));
+  const positions = [], triangles = [], faces = [];
+  const vertex = xyz => { const index = positions.length / 3; positions.push(...xyz); return index; };
+  const quad = (kind, corners) => {
+    const indices = corners.map(vertex);
+    triangles.push(indices[0], indices[1], indices[2], indices[0], indices[2], indices[3]);
+    faces.push({ kind, corners });
+  };
+  const unique = values => [...new Set(values)].sort((a, b) => a - b);
+  const u = unique([-5, 5, ...points.map(p => p.xyz[0]).filter(x => x > -5 && x < 5)]);
+  const v = unique([-5, 5, ...points.map(p => p.xyz[2]).filter(x => x > -5 && x < 5)]);
+  const height = (x, z) => {
+    const feasible = points.filter(p => p.xyz[0] >= x && p.xyz[2] >= z);
+    return feasible.length ? Math.max(...feasible.map(p => p.xyz[1])) : null;
+  };
+  const cells = u.slice(1).map(x => v.slice(1).map(z => height(x, z)));
+  for (let i = 0; i < u.length - 1; i++) {
+    for (let j = 0; j < v.length - 1; j++) {
+      const x0 = u[i], x1 = u[i + 1], z0 = v[j], z1 = v[j + 1], y = cells[i][j];
+      if (y === null) continue;
+      quad('top', [[x0,y,z0], [x0,y,z1], [x1,y,z1], [x1,y,z0]]);
+      const right = cells[i + 1]?.[j] ?? null;
+      if (right !== null && y !== right) quad('step', [[x1,right,z0], [x1,y,z0], [x1,y,z1], [x1,right,z1]]);
+      const above = cells[i][j + 1] ?? null;
+      if (above !== null && y !== above) quad('step', [[x0,above,z1], [x1,above,z1], [x1,y,z1], [x0,y,z1]]);
+    }
+  }
+  const onFace = (xyz, { corners }) => [0,1,2].every(axis => {
+    const coordinates = corners.map(c => c[axis]);
+    return xyz[axis] >= Math.min(...coordinates) && xyz[axis] <= Math.max(...coordinates);
+  });
+  const interior4D = front4.filter(row => !front3.includes(row));
+  const coverage = Object.fromEntries(points.map(({ row, xyz }) => {
+    const inBounds = xyz[0] >= -5 && xyz[0] <= 5 && xyz[2] >= -5 && xyz[2] <= 5;
+    const envelopeBoundary = inBounds && xyz[1] === height(xyz[0], xyz[2]);
+    const face = faces.find(face => face.kind === 'top' && onFace(xyz, face))
+      ?? faces.find(face => face.kind === 'step' && onFace(xyz, face));
+    const boundaryPoint = !face && envelopeBoundary && front3.includes(row) && (xyz[0] === -5 || xyz[2] === -5);
+    if (boundaryPoint) vertex(xyz);
+    const classification = face?.kind ?? (boundaryPoint ? 'top' : 'interior');
+    const boundary = classification === 'top' || classification === 'step';
+    return [row.id, {
+      point: [...xyz],
+      aliases: points.filter(p => p.xyz.every((x, axis) => x === xyz[axis])).map(p => p.row.id),
+      boundary,
+      classification,
+      boundaryPoint,
+      front3: front3.includes(row),
+      front4: front4.includes(row),
+      reason: interior4D.includes(row) ? 'speed preserves full 4D nondomination; dominated in the displayed three axes' : boundary ? 'displayed envelope boundary' : 'dominated in the displayed three axes'
+    }];
+  }));
+  const staircase = axis => {
+    const xs = unique(points.map(p => p.xyz[axis]).filter(x => x >= -5 && x <= 5));
+    if (!xs.length) return [];
+    const boundary = [];
+    let left = -5;
+    for (const x of xs) {
+      const y = Math.max(...points.filter(p => p.xyz[axis] >= x).map(p => p.xyz[1]));
+      if (!boundary.length || boundary.at(-1)[1] !== y) boundary.push([left, y]);
+      if (boundary.at(-1)[0] !== x) boundary.push([x, y]);
+      left = x;
+    }
+    return boundary;
+  };
+  return { front4, front3, front2Cost, front2Tok, surface: { positions, triangles, faces }, interior4D, coverage, stairs: { cost: staircase(0), tok: staircase(2) } };
 }
+// END_FRONTIER_DOMAIN_RUNTIME
 
 // ---------- 全局状态 ----------
 const S = { view: "3d", costScale: "log", tokScale: "log", metric: 0, perfScale: "abs", priceMode: "blend", perTask: false,
@@ -1620,7 +1702,7 @@ const costOf = m => {
 };
 // 性能轴归一化层（spec 改动四）：S.perfScale = "abs" | "norm"。
 // norm(v) = v / max(可见行该指标值) × 100，max 每 rebuild 按当前可见行现算，每指标独立。
-// 归一化只作用于 y 轴读数（值域/投影/tooltip），Pareto/killFront 判定继续用原始 val——
+// 归一化只作用于 y 轴读数（值域/投影/tooltip），Pareto 判定继续用原始 val——
 // 线性单调变换不改支配关系，两态下前沿一致。三条取值路径（metricsOf scale / arenaOf / index 直取）
 // 全部经 perfVal 收敛，不另开旁路。
 let perfMax = 100; // rebuild 时按可见行重算
@@ -1669,47 +1751,15 @@ const xn = {
   tok: v => 1 - axes.tok.project(v),
   idx: v => axes.idx.project(v),
 };
-// 纵轴取当前指标值（killFront 返回的行带 val；普通行带 index）——统一走 m.val ?? m.index
 // tok 缺测行钉在 tok 远端（最优侧）不参与 log 投影，NaN 会污染 mesh/连线几何
 const toWorld = m => new THREE.Vector3(xn.cost(costOf(m)) * W.w,
   xn.idx(m.val ?? m.index) * W.d,
   (typeof m.tok === 'number' && Number.isFinite(m.tok) && m.tok > 0) ? xn.tok(m.tok) * W.h : 0);
 
-// ---------- Delaunay 三角剖分（Bowyer–Watson，2D）----------
-function delaunay(pts) {
-  const n = pts.length; if (n < 3) return [];
-  let minU = Infinity, minV = Infinity, maxU = -Infinity, maxV = -Infinity;
-  for (const p of pts) { minU = Math.min(minU, p.u); maxU = Math.max(maxU, p.u); minV = Math.min(minV, p.v); maxV = Math.max(maxV, p.v); }
-  const dm = Math.max(maxU - minU, maxV - minV, 1e-6);
-  // 超级三角形（远大于点集）
-  const sup = [{u: minU - 20*dm, v: minV - 20*dm}, {u: maxU + 20*dm, v: minV - 20*dm}, {u: (minU+maxU)/2, v: maxV + 20*dm}];
-  const P = pts.concat(sup);
-  const circum = (a, b, c) => {
-    const d = 2 * (a.u*(b.v-c.v) + b.u*(c.v-a.v) + c.u*(a.v-b.v));
-    if (Math.abs(d) < 1e-12) return null;
-    const a2 = a.u*a.u+a.v*a.v, b2 = b.u*b.u+b.v*b.v, c2 = c.u*c.u+c.v*c.v;
-    const x = (a2*(b.v-c.v) + b2*(c.v-a.v) + c2*(a.v-b.v)) / d;
-    const y = (a2*(c.u-b.u) + b2*(a.u-c.u) + c2*(b.u-a.u)) / d;
-    return { x, y, r2: (a.u-x)**2 + (a.v-y)**2 };
-  };
-  let tris = [[n, n+1, n+2]];
-  for (let i = 0; i < n; i++) {
-    const p = P[i], bad = [], edges = new Map();
-    for (const t of tris) {
-      const cc = circum(P[t[0]], P[t[1]], P[t[2]]);
-      // 共线/近退化三角形（circum null）：外接圆无定义，任何新点都应触发翻转——
-      // 否则它永不入空腔，三角化丢三角形（TBench 同 cost 多 effort 共线列的实修）
-      if (!cc || (p.u-cc.x)**2 + (p.v-cc.y)**2 <= cc.r2) bad.push(t);
-    }
-    for (const t of bad) for (const [a, b] of [[t[0],t[1]],[t[1],t[2]],[t[2],t[0]]]) {
-      const k = a < b ? a+"_"+b : b+"_"+a;
-      if (edges.has(k)) edges.delete(k); else edges.set(k, [a, b]);
-    }
-    tris = tris.filter(t => !bad.includes(t));
-    for (const [, e] of edges) tris.push([e[0], e[1], i]);
-  }
-  return tris.filter(t => t[0] < n && t[1] < n && t[2] < n);
-}
+const familyKey = m => m.creator + "|" + baseKey(m.model);
+const plotRect = () => el.getBoundingClientRect();
+const chart = document.getElementById("chart");
+const fromDomain = p => new THREE.Vector3((p[0]+5)*W.w/10, (p[1]+5)*W.d/10, (p[2]+5)*W.h/10);
 
 // ---------- Three.js 基础场景（只建一次）----------
 const el = document.getElementById("chart");
@@ -1718,17 +1768,23 @@ try { theme = localStorage.getItem("mkl-theme") === "light" ? "light" : "dark"; 
 document.documentElement.dataset.theme = theme;
 const palette = () => theme === "dark" ? { bg:0x000000, grid:0x202020, axis:0x555555, text:"#c7cdd2", title:"#f0f3f5" } : { bg:0xfafafa, grid:0xe3e6e8, axis:0x777777, text:"#424b53", title:"#20282f" };
 const scene = new THREE.Scene(); scene.background = new THREE.Color(palette().bg);
-const camera = new THREE.PerspectiveCamera(45, innerWidth / innerHeight, 0.1, 200);
+const camera = new THREE.PerspectiveCamera(45, plotRect().width / plotRect().height, 0.1, 200);
 const renderer = new THREE.WebGLRenderer({ antialias: true });
-renderer.setSize(innerWidth, innerHeight); renderer.setPixelRatio(devicePixelRatio);
+renderer.setSize(plotRect().width, plotRect().height); renderer.setPixelRatio(devicePixelRatio);
 el.replaceChildren(renderer.domElement);
-const controls = new THREE.OrbitControls(camera, renderer.domElement);
-controls.enableDamping = true;
+let controls = new THREE.OrbitControls(camera, renderer.domElement);
+let zoomDistance = null;
+function configureControls() { controls.enableDamping=true; controls.enableZoom=false; controls.minDistance=3; controls.maxDistance=100; }
+configureControls();
 const camera2 = new THREE.OrthographicCamera(-1, 1, 1, -1, 0.1, 100);
-let cam = camera; // 当前活动相机（3D = 透视，2D = 正交）
 scene.add(new THREE.AmbientLight(0xffffff, 0.9));
 const dl = new THREE.DirectionalLight(0xffffff, 0.6); dl.position.set(6, 10, 8); scene.add(dl);
-addEventListener("resize", () => { sync2D(); camera.aspect = innerWidth/innerHeight; camera.updateProjectionMatrix(); renderer.setSize(innerWidth, innerHeight); labelSignature = ""; if (S.view !== "3d") updateLabels(); });
+function resizePlot() {
+  document.documentElement.style.setProperty("--bar-height", document.getElementById("bar").getBoundingClientRect().height+"px");
+  const r=plotRect(); camera.aspect=r.width/r.height; camera.updateProjectionMatrix(); renderer.setSize(r.width,r.height);
+  sync2D(); if(flight) settleView(S.view); labelSignature="";
+}
+addEventListener("resize",resizePlot);
 
 function textSprite(txt, { size = 28, color = palette().text, scale = 1 } = {}) {
   const cv = document.createElement("canvas"); const ctx = cv.getContext("2d");
@@ -1756,7 +1812,7 @@ function buildWorld() {
   const rawVals = valid.map(mi.get);
   perfMax = rawVals.length ? Math.max(...rawVals) : 100;
   if (perfMax === 0) perfMax = 1;
-  const rows = valid.map(m => ({ ...m, val: perfVal(mi.get(m)) }));
+  const rows = valid.map(m => ({ ...m, id: m.creator + "|" + m.model, val: perfVal(mi.get(m)) }));
   axes = {
     cost: createAxisDomain(rows.map(costOf), S.costScale),
     tok: createAxisDomain(rows.map(m => m.tok), S.tokScale),
@@ -1767,7 +1823,9 @@ function buildWorld() {
     tokMin: axes.tok.min, tokMax: axes.tok.max,
     idxMin: axes.idx.min, idxMax: axes.idx.max,
   });
-  const front = killFront(rows);
+  const domainRows = rows.map(m => ({ ...m, cost: costOf(m), val: mi.get(m), src: m }));
+  const frontier = computeFrontier(domainRows, m => { const p=toWorld(m.src); return [p.x/W.w*10-5,p.y/W.d*10-5,p.z/W.h*10-5]; });
+  const front = frontier.front4.map(m => m.src);
   const frontSet = new Set(front);
   const group = new THREE.Group();
   const sprites = [];
@@ -1837,46 +1895,21 @@ function buildWorld() {
   title(`${mi.label} ↑${S.perfScale === "norm" ? "（归一，最强=100）" : mi.unit ? " (" + mi.unit + ")" : ""}`, S.view === "3d" ? [-1.7, W.d/2, -0.85] : [-0.5, W.d/2 + 0.3, -0.45], "both");
   title(`Output Tokens/Task ← ${S.tokScale === "log" ? "log" : "线性"}（原点最多 → 远端最少）`, S.view === "3d" ? [-1.3, -0.85, W.h/2] : [-0.55, -0.45, W.h/2], "tok");
 
-  // --- 前沿节点连面：cost×tok 平面 Delaunay 三角剖分（墨绿 #487265）---
-  const seen = new Map(); // (u,v) 去重 → metric 最高者
-  for (const m of front) {
-    if (!(typeof m.tok === 'number' && Number.isFinite(m.tok) && m.tok > 0)) continue; // tok 缺测行进不了 cost×tok 平面
-    const u = xn.cost(costOf(m)), v = xn.tok(m.tok), k = u.toFixed(4)+"_"+v.toFixed(4);
-    if (!seen.has(k) || seen.get(k).node.val < m.val) seen.set(k, { u, v, node: m });
-  }
-  const triPts = [...seen.values()];
-  const tris = delaunay(triPts.map(p => ({ u: p.u, v: p.v })));
-  if (tris.length) {
-    const pos = [], idxA = [], edges = [];
-    for (let i = 0; i < triPts.length; i++) {
-      const p = triPts[i];
-      pos.push(p.u * W.w, xn.idx(p.node.val) * W.d, p.v * W.h);
-    }
-    for (const t of tris) {
-      idxA.push(t[0], t[1], t[2]);
-      for (const [a, b] of [[t[0],t[1]],[t[1],t[2]],[t[2],t[0]]]) edges.push(a, b);
-    }
+  const surface = frontier.surface;
+  if (surface.triangles.length) {
+    const positions = [];
+    for (let i=0;i<surface.positions.length;i+=3) positions.push(...fromDomain(surface.positions.slice(i,i+3)).toArray());
     const geo = new THREE.BufferGeometry();
-    geo.setAttribute("position", new THREE.Float32BufferAttribute(pos, 3));
-    geo.setIndex(idxA); geo.computeVertexNormals();
-    const faceMesh = new THREE.Mesh(geo, new THREE.MeshPhysicalMaterial({
-      color: 0x487265, transparent: true, opacity: 0.28, side: THREE.DoubleSide,
-      roughness: 0.6, depthWrite: false }));
-    faceMesh.userData.face = true; group.add(faceMesh);
-    const eGeo = new THREE.BufferGeometry();
-    eGeo.setAttribute("position", new THREE.Float32BufferAttribute(
-      edges.flatMap(i => [pos[i*3], pos[i*3+1], pos[i*3+2]]), 3));
-    // 前沿边界语义 = 虚线（与数据连线区分）；LineSegments 每段独立需 computeLineDistances
-    const faceEdge = new THREE.LineSegments(eGeo, new THREE.LineDashedMaterial({
-      color: 0x487265, transparent: true, opacity: 0.7, dashSize: 0.18, gapSize: 0.12 }));
-    faceEdge.computeLineDistances();
-    faceEdge.userData.face = true; group.add(faceEdge);
+    geo.setAttribute("position",new THREE.Float32BufferAttribute(positions,3));
+    geo.setIndex(surface.triangles); geo.computeVertexNormals();
+    const mesh = new THREE.Mesh(geo,new THREE.MeshBasicMaterial({color:0x487265,transparent:true,opacity:0.15,side:THREE.DoubleSide,depthWrite:false}));
+    mesh.userData.face=true; mesh.renderOrder=0; group.add(mesh);
   }
 
   // --- 同模型 effort 档连线（品牌色，原米色 #b0a48a 废弃）---
   const groups = new Map();
   for (const m of rows) {
-    const k = baseKey(m.model);
+    const k = familyKey(m);
     if (!groups.has(k)) groups.set(k, []);
     groups.get(k).push(m);
   }
@@ -1888,28 +1921,19 @@ function buildWorld() {
     const lines = [];
     const coreM = new THREE.LineBasicMaterial({ color: col, transparent: true, opacity: 0.85 });
     const core = new THREE.Line(new THREE.BufferGeometry().setFromPoints(ms.map(m => toWorld(m))), coreM);
-    core.userData.baseKey = baseKey(ms[0].model);
+    core.userData.baseKey = familyKey(ms[0]);
     lines.push(core); group.add(core);
     for (const ln of lines) { ln.userData.baseKey = core.userData.baseKey; (effortLines.get(core.userData.baseKey) ?? effortLines.set(core.userData.baseKey, []).get(core.userData.baseKey)).push(ln); }
   }
 
-  // --- 2D 前沿连线：按视角两维重算的 2D Pareto 前沿，单条实线 ---
-  // 实线加高对比色 = 前沿边界必须一眼可见（旧版浅绿虚线在黑底上不可辨）；
-  // 颜色随主题取自 palette，主题切换会 rebuild 重建材质。WebGL linewidth 恒为 1。
-  const frontColor = () => theme === "dark" ? 0x66d9a8 : 0x2e7358;
-  const solidMat = () => new THREE.LineBasicMaterial({ color: frontColor(), transparent: true, opacity: 0.95 });
-  const frontLine = (axis, off) => {
-    const dims = axis === "cost" ? [{key:"cost",dir:-1},{key:"val",dir:1}] : [{key:"tok",dir:-1},{key:"val",dir:1}];
-    const pts2 = pareto(rows.map(m => ({...m,cost:costOf(m)})), dims)
-      .filter(m => typeof m.tok === 'number' && Number.isFinite(m.tok) && m.tok > 0) // tok 缺测行不进 2D 连线
-      .sort((a, b) => axis === "cost" ? costOf(a) - costOf(b) : a.tok - b.tok)
-      .map(m => { const w = toWorld(m); if (axis === "cost") w.z = off; else w.x = off; return w; });
-    const l = new THREE.Line(new THREE.BufferGeometry().setFromPoints(pts2), solidMat());
-    l.userData.frontLine = true; group.add(l);
-    return { rep: l, lines: [l] };
+  const solidMat = () => new THREE.LineBasicMaterial({color:theme === "dark" ? 0x66d9a8 : 0x2e7358,transparent:true,opacity:0.95});
+  const frontLine = axis => {
+    const points = frontier.stairs[axis].map(([x,y]) => axis === "cost" ? fromDomain([x,y,-5]) : fromDomain([-5,y,x]));
+    points.forEach(p => { if(axis === "cost") p.z=-0.02; else p.x=-0.02; });
+    const l = new THREE.Line(new THREE.BufferGeometry().setFromPoints(points),solidMat());
+    l.userData.frontLine=true; group.add(l); return {rep:l,lines:[l]};
   };
-  const fc = frontLine("cost", -0.02); fc.rep.visible = false; group.add(fc.rep);
-  const ft = frontLine("tok",  -0.02); ft.rep.visible = false; group.add(ft.rep);
+  const fc=frontLine("cost"),ft=frontLine("tok");
 
   // --- 模型 logo 点（统一大小 + 品牌色圈；前沿语义改由三角面/2D 连线承担）---
   for (const m of rows) {
@@ -1933,13 +1957,20 @@ function buildWorld() {
     draw();
     const tex = new THREE.CanvasTexture(cv);
     tex.addEventListener("dispose", () => disposed = true);
-    const sp = new THREE.Sprite(new THREE.SpriteMaterial({ map: tex, transparent: true, alphaTest: 0.1 }));
+    const sp = new THREE.Sprite(new THREE.SpriteMaterial({ map: tex, transparent: true, alphaTest: 0.1, depthTest:false }));
+    sp.renderOrder=4;
     sp.userData = { model: m, s: ICON_BASE * iconScale };
     sp.scale.set(sp.userData.s, sp.userData.s, 1);
     sp.position.copy(toWorld(m));
     sp.material.opacity = 0;
     const dot = new THREE.Mesh(new THREE.SphereGeometry(0.055, 12, 8), new THREE.MeshBasicMaterial({ color:col, transparent:true }));
-    dot.position.copy(sp.position); dot.userData.model = m;
+    dot.position.copy(sp.position); dot.userData.model = m; dot.renderOrder=2; dot.material.depthTest=false;
+    if (frontSet.has(m)) {
+      const ringCanvas=document.createElement("canvas");ringCanvas.width=ringCanvas.height=64;
+      const rc=ringCanvas.getContext("2d");rc.strokeStyle=col;rc.lineWidth=5;rc.beginPath();rc.arc(32,32,27,0,Math.PI*2);rc.stroke();
+      const ring=new THREE.Sprite(new THREE.SpriteMaterial({map:new THREE.CanvasTexture(ringCanvas),transparent:true,depthTest:false,opacity:0.95}));
+      ring.position.copy(sp.position);ring.scale.set(0.21*iconScale,0.21*iconScale,1);ring.userData.model=m;ring.renderOrder=3;group.add(ring);
+    }
     group.add(dot); group.add(sp); sprites.push(sp);
   }
 
@@ -1951,7 +1982,7 @@ function buildWorld() {
   helperGroup.userData.helper = true;
   group.add(helperGroup);
 
-  return { group, sprites, frontSet, frontLines: { cost: fc.lines, tok: ft.lines }, front, rows, effortLines, helperGroup };
+  return { group, sprites, frontSet, frontier, frontLines: { cost: fc.lines, tok: ft.lines }, front, rows, effortLines, helperGroup };
 }
 
 function disposeGroup(g) {
@@ -1965,14 +1996,15 @@ function rebuild({ keepCamera = false } = {}) {
   if (world) { scene.remove(world.group); disposeGroup(world.group); }
   world = buildWorld();
   scene.add(world.group);
+  if (typeof tip !== "undefined") clearHover();
   if (keepCamera) {
     // 筛选/切轴/切指标：保留当前相机位姿，只同步 2D 连线可见性与轴归属（相机不动）
     updateHelperLines(null); // 世界已重建，辅助线引用失效，强制隐藏待下次 hover
     for (const ln of world.frontLines.cost) ln.visible = (S.view === "cost");
     for (const ln of world.frontLines.tok)  ln.visible = (S.view === "tok");
     setAxisVisibility(S.view);
-    if (flight) { camera.fov = flight.tf; camera.updateProjectionMatrix(); flight = null; }
-    controls.enabled = !VIEWS[S.view].lock;
+    if (flight) settleView(S.view);
+    else controls.enabled = !VIEWS[S.view].lock;
   } else applyView(S.view, true);
   updateLegend(); updateState(); updateCfgBtn();
   if (typeof labelLayer !== "undefined") updateLabels();
@@ -1999,43 +2031,50 @@ let orthoZoom = 1;          // 相对满幅取景的缩放
 let panX = 0, panY = 0;     // 相机空间平移偏移（拖拽产生，缩放时保留）
 let cur2D = null;           // 最近一次 frame2D 的取景 { halfH }
 function frame2D(view) {
-  const aspect = innerWidth / innerHeight;
+  const aspect = plotRect().width / plotRect().height;
   const horiz = view === "cost" ? W.w : W.h;   // 屏幕横向对应的世界宽度
-  let halfW = horiz * 0.7 / orthoZoom, halfH = W.d * 0.9 / orthoZoom;
+  let halfW = horiz * 0.57 / orthoZoom, halfH = W.d * 0.64 / orthoZoom;
   if (halfW / halfH < aspect) halfW = halfH * aspect; else halfH = halfW / aspect;
   camera2.left = -halfW + panX; camera2.right = halfW + panX;
   camera2.top = halfH + panY - W.d*0.09; camera2.bottom = -halfH + panY - W.d*0.09;
   camera2.updateProjectionMatrix();
   cur2D = { halfH };
+  if(world) world.group.traverse(o=> {
+    if(!o.isSprite || !o.userData.axis) return;
+    if(!o.userData.originalScale) o.userData.originalScale=o.scale.clone();
+    const base=o.userData.originalScale, desired=12/(plotRect().height/(halfH*2));
+    const k=Math.max(1,desired/base.y);o.scale.copy(base).multiplyScalar(k);
+  });
 }
 function sync2D() { if (S.view !== "3d") frame2D(S.view); }
 
 // 2D 模式渲染正交相机；3D 及飞行过程中渲染透视相机（保证飞行可见）
 function activeCamera() { return (flight || S.view === "3d") ? camera : camera2; }
 
+function settleView(v) {
+  const vp=VIEWS[v]; flight=null; drag2D=null; zoomDistance=null;
+  controls.dispose(); controls=new THREE.OrbitControls(camera,renderer.domElement); configureControls();
+  controls.target.copy(vp.tgt); camera.position.copy(vp.pos); camera.fov=45; camera.lookAt(vp.tgt); camera.updateProjectionMatrix();
+  camera2.position.copy(vp.pos); camera2.lookAt(vp.tgt); frame2D(v);
+  controls.enabled=!vp.lock; controls.update();
+}
 function applyView(v, instant) {
-  const previousView = S.view;
-  S.view = v;
-  if (world && (previousView === "3d") !== (v === "3d")) rebuild({ keepCamera: true });
-  const { pos, tgt, lock } = VIEWS[v];
-  updateHelperLines(null); // 切视图清辅助线（2D/3D 线形不同，重建于下次 hover）
-  for (const ln of world.frontLines.cost) ln.visible = (v === "cost");
-  for (const ln of world.frontLines.tok)  ln.visible = (v === "tok");
-  setAxisVisibility(v);
-  frame2D(v);
-  if (instant) {
-    orthoZoom = 1; panX = 0; panY = 0; frame2D(v);
-    camera2.position.copy(pos); camera2.lookAt(tgt);
-    camera.position.copy(pos); controls.target.copy(tgt); camera.fov = 45; camera.updateProjectionMatrix();
-    controls.enabled = !lock; flight = null;
-  } else {
-    // 飞行终点 fov：2D 落地时透视取景高度 = 正交取景高度（无跳变）；3D 回到 45
-    const tf = v === "3d" ? 45 : 2 * Math.atan(cur2D.halfH / pos.distanceTo(tgt)) * 180 / Math.PI;
-    flight = { t0: performance.now(), fp: camera.position.clone(), tp: pos.clone(), ft: controls.target.clone(), tt: tgt.clone(),
-               ff: camera.fov, tf, lock };
-    controls.enabled = false;
+  const previous=S.view, wasPlanar=previous!=="3d" && !flight;
+  if(wasPlanar) { camera.position.copy(camera2.position); camera.quaternion.copy(camera2.quaternion); controls.target.copy(VIEWS[previous].tgt); }
+  S.view=v;
+  if(world && (previous === "3d") !== (v === "3d")) rebuild({keepCamera:true});
+  clearHover(); drag2D=null; zoomDistance=null;
+  for(const ln of world.frontLines.cost) ln.visible=v==="cost";
+  for(const ln of world.frontLines.tok) ln.visible=v==="tok";
+  setAxisVisibility(v); frame2D(v);
+  if(instant) { orthoZoom=1;panX=0;panY=0;settleView(v); }
+  else {
+    const {pos,tgt,lock}=VIEWS[v];
+    const tf=v==="3d" ? 45 : 2*Math.atan(cur2D.halfH/pos.distanceTo(tgt))*180/Math.PI;
+    flight={t0:performance.now(),fp:camera.position.clone(),tp:pos.clone(),ft:controls.target.clone(),tt:tgt.clone(),ff:camera.fov,tf,lock};
+    controls.enabled=false;
   }
-  [...bar.querySelectorAll("button[data-view]")].forEach(b => b.classList.toggle("on", b.dataset.view === v));
+  [...bar.querySelectorAll("button[data-view]")].forEach(b=>b.classList.toggle("on",b.dataset.view===v));
   updateState();
 }
 
@@ -2045,7 +2084,7 @@ function updateState() {
   const total = visible().length, missing = total - world.rows.length;
   const cov = missing > 0 ? ` · ${METRICS[S.metric].label} 覆盖 ${world.rows.length}/${total}（未测 ${missing} 档隐藏）` : "";
   setHTML(document.getElementById("state"),
-    `${world.rows.length} 模型 · <b class="red">4D 前沿 ${world.front.length}</b> · 被斩 ${world.rows.length - world.front.length}${cov}` +
+    `${world.rows.length} 模型 · <b class="red">完整 4D 非支配 ${world.front.length}</b> · 3D 前沿 ${world.frontier.front3.length} · 速度权衡 ${world.frontier.interior4D.length}${cov}` +
     (v === "3d" ? " · 拖拽旋转 / 滚轮缩放 / 悬停看模型"
      : v === "cost" ? " · 2D Cost×Metric · 滚轮缩放 / 拖拽平移 / 悬停看模型"
      : " · 2D Token×Metric · 滚轮缩放 / 拖拽平移 / 悬停看模型"));
@@ -2060,50 +2099,38 @@ function setAxisVisibility(view) {
 function animate() {
   (function loop() {
     requestAnimationFrame(loop);
-    const rc = activeCamera();
-    if (flight) {
-      const k = Math.min(1, (performance.now() - flight.t0) / 800), e = ease(k);
-      camera.position.lerpVectors(flight.fp, flight.tp, e);
-      controls.target.lerpVectors(flight.ft, flight.tt, e);
-      camera.fov = flight.ff + (flight.tf - flight.ff) * e; camera.updateProjectionMatrix();
-      camera.lookAt(controls.target);
-      if (k >= 1) {
-        controls.enabled = !flight.lock; flight = null;
-        // 2D 落地：正交相机就位（飞行全程渲染透视相机，落地瞬间切正交，取景高度一致 → 无跳变）
-        if (S.view !== "3d") { const vp = VIEWS[S.view]; camera2.position.copy(vp.pos); camera2.lookAt(vp.tgt); }
+    if(flight) {
+      const k=Math.min(1,(performance.now()-flight.t0)/800),e=ease(k);
+      camera.position.lerpVectors(flight.fp,flight.tp,e); controls.target.lerpVectors(flight.ft,flight.tt,e);
+      camera.fov=flight.ff+(flight.tf-flight.ff)*e; camera.updateProjectionMatrix(); camera.lookAt(controls.target);
+      if(k>=1) settleView(S.view);
+    } else if(S.view==="3d") {
+      controls.update();
+      if(zoomDistance!==null) {
+        const delta=camera.position.clone().sub(controls.target),d=delta.length();
+        const next=d+(zoomDistance-d)*0.18; camera.position.copy(controls.target).add(delta.setLength(next));
+        if(Math.abs(next-zoomDistance)<0.001) zoomDistance=null;
       }
-    } else if (S.view === "3d") controls.update();
-    renderer.render(scene, rc);
-    updateLabels();
+    }
+    renderer.render(scene,activeCamera()); updateLabels(); updateFrontFill();
   })();
 }
-
-// 2D 交互：正交缩放（滚轮）+ 平移（拖拽）
+let drag2D=null;
 function setup2DControls() {
-  const dom = renderer.domElement;
-  dom.addEventListener("wheel", (e) => {
-    if (S.view === "3d") return;
-    e.preventDefault();
-    orthoZoom *= e.deltaY < 0 ? 1.12 : 1/1.12;
-    orthoZoom = Math.min(20, Math.max(0.5, orthoZoom));
-    frame2D(S.view);
-  }, { passive: false });
-  let drag = null;
-  dom.addEventListener("mousedown", (e) => {
-    if (S.view === "3d") return;
-    drag = { x: e.clientX, y: e.clientY };
+  const dom=renderer.domElement;
+  dom.addEventListener("wheel",e=> {
+    e.preventDefault(); if(flight) return;
+    const delta=e.deltaY*(e.deltaMode===1 ? 16 : e.deltaMode===2 ? plotRect().height : 1);
+    if(S.view==="3d") zoomDistance=Math.min(100,Math.max(3,(zoomDistance ?? camera.position.distanceTo(controls.target))*Math.exp(delta*0.001)));
+    else { orthoZoom=Math.min(20,Math.max(0.5,orthoZoom*Math.exp(-delta*0.001)));frame2D(S.view); }
+  },{passive:false});
+  dom.addEventListener("mousedown",e=> { if(!flight && S.view!=="3d") drag2D={x:e.clientX,y:e.clientY}; });
+  addEventListener("mousemove",e=> {
+    if(!drag2D || flight || S.view==="3d") return;
+    const r=plotRect(),dx=(e.clientX-drag2D.x)/r.width*(camera2.right-camera2.left),dy=(e.clientY-drag2D.y)/r.height*(camera2.top-camera2.bottom);
+    drag2D={x:e.clientX,y:e.clientY}; panX-=dx;panY+=dy;frame2D(S.view);
   });
-  addEventListener("mousemove", (e) => {
-    if (!drag || S.view === "3d") return;
-    const dW = (e.clientX - drag.x) / innerHeight * (camera2.right - camera2.left); // 世界单位
-    const dH = (e.clientY - drag.y) / innerHeight * (camera2.top - camera2.bottom);
-    drag = { x: e.clientX, y: e.clientY };
-    // 屏幕右移内容 → 取景窗口左移（相机空间平移量累积到 panX/panY，缩放后保留）
-    panX -= dW; panY += dH;
-    camera2.left += -dW; camera2.right += -dW; camera2.top += dH; camera2.bottom += dH;
-    camera2.updateProjectionMatrix();
-  });
-  addEventListener("mouseup", () => drag = null);
+  addEventListener("mouseup",()=>drag2D=null);
 }
 setup2DControls();
 
@@ -2114,8 +2141,7 @@ const ray = new THREE.Raycaster(), mouse = new THREE.Vector2();
 // 其余一切（他组连线、他组点、前沿连线/三角面、轴与刻度）整体压暗到 0.12 —— 视觉"虚化"。
 // 默认态（无命中/移出）全体恢复各自初始 opacity。
 function highlightEffort(hoverKey) {
-  // 单点模型（组内无连线、不在 effortLines）视同无命中：全部保持默认态
-  const key = hoverKey !== null && world.effortLines.has(hoverKey) ? hoverKey : null;
+  const key = hoverKey;
   const DIM = 0.12;
   // 连线：命中组保持默认，他组压暗
   for (const [k, lines] of world.effortLines) {
@@ -2131,7 +2157,7 @@ function highlightEffort(hoverKey) {
     const isEffLine = ud.baseKey && world.effortLines.has(ud.baseKey); // 已由上方循环处理
     if (isEffLine) return;
     const isAxis = ud.axis, isFront = ud.frontLine || ud.face;
-    const isHit = ud.model && key !== null && baseKey(ud.model.model) === key;
+    const isHit = ud.model && key !== null && familyKey(ud.model) === key;
     if (!isAxis && !isFront && !o.isSprite && !ud.model) return;
     if (o.isSprite && !ud.model) return; // 刻度/标题等文字 sprite 由 isAxis 分支管
     o.material.opacity = key === null ? ud.baseOp
@@ -2149,7 +2175,7 @@ function updateHelperLines(model) {
   if (!model) { g.visible = false; return; }
   const col = creatorColor(model.creator);
   const mat = () => new THREE.LineDashedMaterial({ color: new THREE.Color(col), transparent: true, opacity: 0.75, dashSize: 0.14, gapSize: 0.1 });
-  const peers = world.rows.filter(m => baseKey(m.model) === baseKey(model.model));
+  const peers = world.rows.filter(m => familyKey(m) === familyKey(model));
   for (const m of peers) {
     const p = toWorld(m);
     const segs = S.view === "3d"
@@ -2168,34 +2194,51 @@ function updateHelperLines(model) {
   g.visible = true;
 }
 
-renderer.domElement.addEventListener("mousemove", (e) => {
-  if (!world) return;
-  mouse.x = (e.clientX / innerWidth) * 2 - 1; mouse.y = -(e.clientY / innerHeight) * 2 + 1;
-  ray.setFromCamera(mouse, activeCamera());
-  const hits = ray.intersectObjects(world.sprites);
-  if (hits.length) {
-    const m = hits[0].object.userData.model;
-    world.sprites.forEach(sp => { sp.material.opacity = sp === hits[0].object ? 1 : 0; });
-    highlightEffort(baseKey(m.model));
-    hits[0].object.material.opacity = 1;
-    updateHelperLines(m);
-    const mi = METRICS[S.metric];
-    const mv = mi.get(m);
-    const uri = LOGOS[logoOf(m.model)] || "";
-    const fmtMetric = v => mi.unit === "%" ? v.toFixed(1) + "%" : Math.round(v * 100) / 100;
-    const metricRead = mv === null || mv === undefined ? "—"
-      : S.perfScale === "norm" ? `${fmtMetric(perfVal(mv))}（原始 ${fmtMetric(mv)}）` : fmtMetric(mv);
-    setHTML(tip, `<div class="tip-head">${uri ? `<img src="${uri}">` : ""}<span class="tip-name">${esc(m.model)}</span></div>` +
-      `<div class="tip-row">价格 <b>${fmtCost(costOf(m))}</b> ${PRICE_MODES.find(p => p.key === S.priceMode).label}${S.perTask ? "/task" : " $/M tok"}</div>` +
-      pricingTooltip(m) +
-      `<div class="tip-row">${mi.label} <b>${metricRead}</b></div>` +
-      `<div class="tip-row">${fmtTok(m.tok)} tok/task · ${m.speed ?? "—"} tok/s</div>` +
-      (world.frontSet.has(m) ? `<div class="front">🔪 4D 前沿</div>` : `<div class="tip-row">非 4D 前沿</div>`));
-    tip.style.display = "block";
-    tip.style.left = Math.min(e.clientX + 14, innerWidth - tip.offsetWidth - 16) + "px"; tip.style.top = Math.min(e.clientY + 14, document.getElementById("bar").getBoundingClientRect().top - tip.offsetHeight - 12) + "px";
-  } else { tip.style.display = "none"; highlightEffort(null); world.sprites.forEach(sp => sp.material.opacity = 0); updateHelperLines(null); }
-  world.sprites.forEach(sp => { if (!hits.length || sp !== hits[0].object) sp.material.opacity = 0; });
-});
+let hovered=null,hoverState=null;
+function setHovered(sp) {
+  if(!sp) { clearHover(); return; }
+  hovered=sp; const m=sp.userData.model;hoverState={modelId:m.id,familyKey:familyKey(m)};
+  highlightEffort(hoverState.familyKey);
+  world.sprites.forEach(p=>p.material.opacity=familyKey(p.userData.model)===hoverState.familyKey ? 1 : 0);
+  updateHelperLines(m);
+  const mi=METRICS[S.metric],mv=mi.get(m),uri=LOGOS[logoOf(m.model)]||"";
+  setHTML(tip, `<div class="tip-head">${uri ? `<img src="${uri}">` : ""}<span class="tip-name">${esc(m.model)}</span></div><div class="tip-row">价格 <b>${fmtCost(costOf(m))}</b> ${S.perTask ? "/task" : "$ /M tok"}</div>`+pricingTooltip(m)+`<div class="tip-row">${mi.label} <b>${mv ?? "未测"}</b></div><div class="tip-row">${fmtTok(m.tok)} tok/task · ${m.speed ?? "未测"} tok/s</div><div class="front">${world.frontSet.has(m) ? "4D 非支配配置" : "非 4D 前沿"}</div>`);
+  const cov=world.frontier.coverage[m.id];
+  if(world.frontSet.has(m) && !cov.front3) tip.insertAdjacentHTML("beforeend",'<div class="front">速度优势保留完整 4D 非支配资格。当前三轴投影被支配，不必位于顶面。</div>');
+  const p=toWorld(m),axis=S.view==="tok" ? "z" : "x";
+  const aliases=world.rows.filter(r=> { const q=toWorld(r);return S.view==="3d" ? q.equals(p) : q[axis]===p[axis] && q.y===p.y; });
+  if(aliases.length>1) {
+    const list=document.createElement("div");list.className="aliases";
+    for(const a of aliases) { const b=document.createElement("button");b.textContent=a.model;b.onclick=()=>setHovered(world.sprites.find(s=>s.userData.model.id===a.id));list.append(b); }
+    tip.append(list);
+  }
+  labelSignature="";updateLabels();
+}
+function pickAt(e) {
+  const r=plotRect();mouse.x=(e.clientX-r.left)/r.width*2-1;mouse.y=-(e.clientY-r.top)/r.height*2+1;
+  ray.setFromCamera(mouse,activeCamera());
+  const hits=ray.intersectObjects(world.sprites);
+  const project=m=> { const p=toWorld(m).project(activeCamera());return {x:(p.x+1)*r.width/2+r.left,y:(1-p.y)*r.height/2+r.top}; };
+  if(hits.length) {
+    if(S.view!=="3d") hits.sort((a,b)=> {
+      const pa=project(a.object.userData.model),pb=project(b.object.userData.model);
+      return Math.hypot(pa.x-e.clientX,pa.y-e.clientY)-Math.hypot(pb.x-e.clientX,pb.y-e.clientY);
+    });
+    return hits[0].object;
+  }
+  let best=null,distance=7;
+  for(const lines of world.effortLines.values()) for(const line of lines) {
+    const ms=world.rows.filter(m=>familyKey(m)===line.userData.baseKey).sort((a,b)=>costOf(a)-costOf(b));
+    for(let i=1;i<ms.length;i++) {
+      const a=project(ms[i-1]),b=project(ms[i]),dx=b.x-a.x,dy=b.y-a.y,len=dx*dx+dy*dy;
+      const t=len ? Math.min(1,Math.max(0,((e.clientX-a.x)*dx+(e.clientY-a.y)*dy)/len)) : 0;
+      const d=Math.hypot(e.clientX-a.x-t*dx,e.clientY-a.y-t*dy);
+      if(d<distance) { distance=d;best=world.sprites.find(s=>s.userData.model===ms[t<0.5 ? i-1 : i]); }
+    }
+  }
+  return best;
+}
+renderer.domElement.addEventListener("mousemove",e=> { if(!world || flight || drag2D) return;const hit=pickAt(e);if(hit!==hovered)setHovered(hit); });
 
 // ---------- DeepSWE 式筛选 popover（三态 checkbox + effort chips + Select all/Clear + Configs(n/m)）----------
 const cfgEl = document.getElementById("cfgpop");
@@ -2402,7 +2445,7 @@ document.getElementById("cfg-none").onclick = () => {
 
 // ---------- 底栏 ----------
 const bar = document.getElementById("bar");
-new ResizeObserver(() => document.documentElement.style.setProperty("--bar-height", `${bar.getBoundingClientRect().height}px`)).observe(bar);
+new ResizeObserver(() => { document.documentElement.style.setProperty("--bar-height", `${bar.getBoundingClientRect().height}px`); resizePlot(); }).observe(bar);
 const mkBtn = (txt, attrs) => { const b = document.createElement("button"); b.textContent = txt; for (const [k2, v2] of Object.entries(attrs)) b.dataset[k2] = v2; bar.appendChild(b); return b; };
 [["3D", "3d"], ["Cost–Metric (2D)", "cost"], ["Token–Metric (2D)", "tok"]].forEach(([txt, v]) =>
   mkBtn(txt, { view: v }).onclick = () => applyView(v, false));
@@ -2479,91 +2522,50 @@ function updateLegend() {
   const firstCreator = world.rows[0] ? world.rows[0].creator : "";
   const effCreator = (world.rows.find((m, i, arr) => arr.findIndex(x => x.creator === m.creator) === i) || {}).creator || "";
   setHTML(document.getElementById("legend"), `
-    <div class="row"><span class="ln" style="border-color:#66d9a8;"></span>Pareto frontier（2D 实线）</div>
-    <div class="row"><span class="ln" style="border-color:#487265; border-top-style:dashed;"></span>4D 前沿边界（3D 虚线描边）</div>
+    <div class="row"><span class="ln" style="border-color:#66d9a8;"></span>2D 已观测前沿与上方未达区域</div>
+    <div class="row"><span style="width:22px;height:10px;background:#487265;opacity:0.5;"></span>当前三轴支配域阶梯面</div>
     <div class="row"><span class="sw" style="background:${creatorColor(firstCreator)}"></span>模型（厂商色点 · hover 显示图标）</div>
     <div class="row"><span class="ln" style="border-color:${creatorColor(effCreator)}; border-top-width:3px;"></span>同模型 effort 连线（加粗）</div>`);
 }
 
-// Screen-space labels own text measurement and collision arbitration.
-const labelLayer = document.getElementById("labels");
-let labelSignature = "";
+const labelLayer=document.getElementById("labels");
+const fillLayer=document.getElementById("front-fill");
+let labelSignature="",fillSignature="";
+function screenPoint(p,cam=activeCamera()) { const r=plotRect(),q=p.clone().project(cam);return [(q.x+1)*r.width/2,(1-q.y)*r.height/2]; }
+function updateFrontFill() {
+  if(!world || S.view==="3d" || flight) {fillLayer.replaceChildren();fillSignature="";return;}
+  const r=plotRect(),stairs=world.frontier.stairs[S.view];
+  const pts=stairs.map(([x,y])=>screenPoint(S.view==="cost" ? fromDomain([x,y,-5]) : fromDomain([-5,y,x]),camera2));
+  const sig=JSON.stringify([S.view,r.width,r.height,pts]);if(sig===fillSignature)return;fillSignature=sig;fillLayer.replaceChildren();
+  if(!pts.length)return;
+  const polygon=document.createElementNS("http://www.w3.org/2000/svg","polygon");
+  polygon.dataset.axis=S.view;polygon.setAttribute("points",[...pts,[pts.at(-1)[0],0],[pts[0][0],0]].map(p=>p.join(",")).join(" "));
+  fillLayer.append(polygon);
+}
 function updateLabels() {
-  if (!world || S.view === "3d" || flight) { labelLayer.replaceChildren(); labelSignature = ""; window.__labelCoverage = null; return; }
-  const dims = S.view === "cost" ? [{key:"cost",dir:-1},{key:"val",dir:1}] : [{key:"tok",dir:-1},{key:"val",dir:1}];
-  const front2 = new Set(pareto(world.rows.map(m=>({cost:costOf(m),tok:m.tok,val:m.val,src:m})), dims).map(m=>m.src));
-  // 覆盖全部可见点；名称属 baseModel（每模型只标一次），effort 属点。
-  // 优先级序（前沿在前，val 降序）决定放置顺序；名称点被避碰丢弃时顺延给同模型下一个点。
-  const items = world.rows.map(m => ({m, front: front2.has(m)}));
-  items.sort((a,b) => (b.front - a.front) || (b.m.val - a.m.val));
-  const projected = items.map(({m,front}) => { const p=toWorld(m).project(camera2); return {m,front,x:(p.x+1)*innerWidth/2,y:(1-p.y)*innerHeight/2}; });
-  const signature = JSON.stringify([theme,innerWidth,innerHeight,projected.map(p=>[p.m.model,p.x,p.y])]);
-  if (signature === labelSignature) return;
-  labelSignature = signature; labelLayer.replaceChildren();
-  const legendBox=document.getElementById("legend").getBoundingClientRect();
-  const ns="http://www.w3.org/2000/svg", occupied=[{x:legendBox.x,y:legendBox.y,w:legendBox.width,h:legendBox.height}];
-  const make = (tag,attrs) => { const n=document.createElementNS(ns,tag); for(const [k,v] of Object.entries(attrs)) n.setAttribute(k,v); return n; };
-  // 上界同时受底栏与状态条约束：状态条区域整体不进标签区（避免时序依赖的 occupied 竞态）
-  const barBox = document.getElementById("bar").getBoundingClientRect();
-  const stateTop = document.getElementById("state").getBoundingClientRect().top;
-  const ceiling = Math.min(barBox.top - 12, stateTop > 0 ? stateTop - 8 : Infinity);
-  const allBase = [...new Set(world.rows.map(m => baseKey(m.model)))];
-  const namePending = new Set(allBase);
-  // 轴刻度/轴标题 sprite 与状态条占屏：逐 sprite 矩形避让（轴侧间隙仍可用于放标签）
-  const pxPerWorld = innerHeight / (camera2.top - camera2.bottom);
-  world.group.traverse(o => {
-    if (!o.isSprite || !o.userData.axis) return;
-    const p = o.position.clone().project(camera2);
-    const cx = (p.x + 1) * innerWidth / 2, cy = (1 - p.y) * innerHeight / 2;
-    const hw = o.scale.x * pxPerWorld / 2 + 10, hh = o.scale.y * pxPerWorld / 2 + 8;
-    occupied.push({ x: cx - hw, y: cy - hh, w: hw * 2, h: hh * 2 });
-  });
-  const stateBox = document.getElementById("state").getBoundingClientRect();
-  if (stateBox.height > 0) occupied.push({ x: stateBox.x, y: stateBox.y, w: stateBox.width, h: stateBox.height });
-  for (const {m,x,y,front} of projected) {
-    if(x<0||x>innerWidth||y<85||y>ceiling) continue;
-    const bk = baseKey(m.model), withName = namePending.has(bk);
-    const g=make("g",{"data-model":m.model,"data-front":front}), text=make("text",{x:0,y:0});
-    text.setAttribute("fill", creatorColor(m.creator));
-    if (withName) {
-      const name=make("tspan",{x:0,dy:0}), effort=make("tspan",{x:0,dy:13,class:"effort"});
-      name.textContent = effortOf(m.model)==="BASE" ? m.model : bk;
-      effort.textContent = effortOf(m.model);
-      text.append(name,effort);
-    } else {
-      const effort=make("tspan",{x:0,dy:0,class:"effort"});
-      effort.textContent = effortOf(m.model);
-      text.append(effort);
-    }
-    g.append(text); labelLayer.append(g);
-    const bb=text.getBBox(), w=bb.width+12,h=bb.height+8;
-    // 名称标签承担覆盖责任，给更宽的搜索（4 列 × 200 环）；仍放不下才丢，
-    // 丢名计入 __labelCoverage.dropped（hover tooltip 是替代入口）
-    const dxs = withName ? [10,-w-10,44,-w-44] : [10,-w-10];
-    let box=null;
-    for(const dx of dxs) { if(box) break;
-      for(let ring=0;ring<200&&!box;ring++) for(const sign of [1,-1]) {
-        const bx=Math.max(12,Math.min(innerWidth-w-12,x+dx)), by=Math.max(90,Math.min(ceiling-h,y-8+sign*ring*(h+3)));
-        const b={x:bx,y:by,w,h};
-        if(!occupied.some(o=>b.x<o.x+o.w+4&&b.x+b.w+4>o.x&&b.y<o.y+o.h+3&&b.y+b.h+3>o.y)) {box=b;break;}
-      }
-    }
-    if(!box) { g.remove(); continue; }
-    if (withName) namePending.delete(bk);
-    occupied.push(box);
-    const ln=make("line",{x1:x,y1:y,x2:box.x,y2:box.y+box.h/2});
-    if(Math.abs(box.y-y)>h)g.prepend(ln);
-    text.setAttribute("transform",`translate(${box.x+6},${box.y+4-bb.y})`);
+  const r=plotRect();
+  for(const layer of [labelLayer,fillLayer]) {layer.style.left=r.left+"px";layer.style.top=r.top+"px";layer.style.width=r.width+"px";layer.style.height=r.height+"px";layer.setAttribute("viewBox",`0 0 ${r.width} ${r.height}`);}
+  if(!world || !hoverState || flight) {labelLayer.replaceChildren();labelSignature="";window.__labelCoverage=null;return;}
+  const family=world.rows.filter(m=>familyKey(m)===hoverState.familyKey);
+  const points=family.map(m=>({m,p:screenPoint(toWorld(m))}));
+  const sig=JSON.stringify([theme,hoverState,r.width,r.height,points.map(p=>p.p)]);if(sig===labelSignature)return;labelSignature=sig;labelLayer.replaceChildren();
+  const ns="http://www.w3.org/2000/svg";
+  for(const {m,p} of points) {
+    const g=document.createElementNS(ns,"g"),text=document.createElementNS(ns,"text");g.dataset.model=m.model;g.dataset.front=String(world.frontSet.has(m));
+    text.setAttribute("fill",creatorColor(m.creator));text.setAttribute("x",p[0]+10);text.setAttribute("y",p[1]-10);
+    const effort=document.createElementNS(ns,"tspan");effort.textContent=effortOf(m.model);effort.setAttribute("class","effort");
+    if(m.id===hoverState.modelId) {const name=document.createElementNS(ns,"tspan");name.textContent=baseKey(m.model);name.setAttribute("x",p[0]+10);text.append(name);effort.setAttribute("x",p[0]+10);effort.setAttribute("dy",13);}
+    text.append(effort);g.append(text);labelLayer.append(g);
+    const b=text.getBBox();text.setAttribute("transform",`translate(${Math.max(0,-b.x+4)+Math.min(0,r.width-b.x-b.width-4)},${Math.max(0,-b.y+4)+Math.min(0,r.height-b.y-b.height-4)})`);
   }
-  // 覆盖率审计：named = 已标注名称的 base 模型；dropped = 避碰/裁剪丢弃名称的 base 模型
-  window.__labelCoverage = { named: allBase.filter(bk => !namePending.has(bk)), dropped: [...namePending] };
+  window.__labelCoverage={named:[baseKey(hovered.userData.model.model)],dropped:[]};
 }
 function setTheme(next) {
   theme=next; document.documentElement.dataset.theme=theme;
   try { localStorage.setItem("mkl-theme",theme); } catch {}
   scene.background.setHex(palette().bg);
   document.querySelectorAll("#theme-switch button").forEach(b=>b.classList.toggle("on",b.dataset.theme===theme));
-  tip.style.display="none"; rebuild({keepCamera:true});
+  rebuild({keepCamera:true});
 }
 document.querySelectorAll("#theme-switch button").forEach(b=> { b.classList.toggle("on",b.dataset.theme===theme); b.onclick=()=>setTheme(b.dataset.theme); });
 const controlGroups = [
@@ -2578,13 +2580,14 @@ for(const [title,selector] of controlGroups) {
   const label=document.createElement("span"); label.className="group-label";label.textContent=title;
   group.append(label,...nodes);bar.append(group);
 }
-function clearHover() { tip.style.display="none";highlightEffort(null);world.sprites.forEach(sp=>sp.material.opacity=0);updateHelperLines(null); }
+function clearHover() { hovered=null;hoverState=null;setHTML(tip,'<div class="tip-name">配置详情</div><div class="tip-row">悬停点或 effort 连线查看。重合配置可在此切换。</div>');if(world) {highlightEffort(null);world.sprites.forEach(sp=>sp.material.opacity=0);updateHelperLines(null);}labelSignature=""; }
 renderer.domElement.addEventListener("mouseleave",e=> { if (!tip.contains(e.relatedTarget)) clearHover(); });
 tip.addEventListener("mouseleave",e=> { if (e.relatedTarget !== renderer.domElement) clearHover(); });
 // ---------- 启动 ----------
 bar.querySelector("button[data-metric=\"0\"]")?.classList.add("on");
 buildCfg();
 updateCfgBtn();
+resizePlot();
 rebuild();
 animate();
 </script>

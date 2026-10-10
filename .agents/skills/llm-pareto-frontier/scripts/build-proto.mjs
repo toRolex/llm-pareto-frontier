@@ -28,6 +28,8 @@ let html = readFileSync(HTML, 'utf8');
 const axisSource = await readFile(new URL('./axis-domain.mjs', import.meta.url), 'utf8');
 html = html.replace(/\/\/ AXIS_DOMAIN_RUNTIME[\s\S]*?\/\/ END_AXIS_DOMAIN_RUNTIME\n/, `// AXIS_DOMAIN_RUNTIME\n${axisSource.replace(/^export /gm, '')}// END_AXIS_DOMAIN_RUNTIME\n`);
 const pricingSource = await readFile(new URL('./pricing-model.mjs', import.meta.url), 'utf8');
+const frontierSource = await readFile(new URL('./frontier-domain.mjs', import.meta.url), 'utf8');
+html = html.replace(/\/\/ FRONTIER_DOMAIN_RUNTIME[\s\S]*?\/\/ END_FRONTIER_DOMAIN_RUNTIME/, `// FRONTIER_DOMAIN_RUNTIME\n${frontierSource.replace(/^export /gm, '')}// END_FRONTIER_DOMAIN_RUNTIME`);
 
 // JSON 读取统一走 readJson：解析失败时报出具体文件名，而不是裸 SyntaxError
 function readJson(file) {

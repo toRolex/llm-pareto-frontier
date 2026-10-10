@@ -21,7 +21,7 @@ const ready = async p => {
 };
 const settle = async () => {
   // 2D 场景必须等到标签层按当前视口重算（flight 期间签名被清空，落地后才重建）
-  await page.waitForFunction(() => !flight && (S.view === '3d' || labelSignature !== ''));
+  await page.waitForFunction(() => !flight);
   await page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
 };
 
@@ -54,7 +54,17 @@ const inspect = () => page.evaluate(() => {
     normalize(m.tok, DOM.tokMax, DOM.tokMin, S.tokScale, rows.map(m => m.tok)) * W.h];
   const pointFailures = world.sprites.filter(sp => !sp.position.toArray().every((v, i) => close(v, position(sp.userData.model)[i])))
     .map(sp => sp.userData.model.model);
-  const expectedLine = front.flatMap(m => { const p = position(m); p[axis === 'cost' ? 2 : 0] = -0.02; return p; });
+  const coordinates = rows.map(position), component = axis === 'cost' ? 0 : 2;
+  const xs = [...new Set(coordinates.map(p => p[component]))].sort((a, b) => a - b);
+  const stairs = [];
+  let left = 0;
+  for (const x of xs) {
+    const y = Math.max(...coordinates.filter(p => p[component] >= x).map(p => p[1]));
+    if (!stairs.length || stairs.at(-1)[1] !== y) stairs.push([left, y]);
+    if (stairs.at(-1)[0] !== x) stairs.push([x, y]);
+    left = x;
+  }
+  const expectedLine = stairs.flatMap(([x, y]) => axis === 'cost' ? [x, y, -0.02] : [-0.02, y, x]);
   const actualLine = Array.from(world.frontLines[axis][0].geometry.attributes.position.array);
   const lineMatches = actualLine.length === expectedLine.length && actualLine.every((v, i) => close(v, expectedLine[i]));
   const flagFailures = labels.filter(l => l.front !== front.some(m => m.model === l.name)).map(l => l.name);
@@ -96,45 +106,7 @@ function verify(record, { relaxedBounds = false } = {}) {
   assert.equal(record.frontMat.dashed, false, 'front line must be solid, not dashed');
   assert.ok(['66d9a8', '2e7358'].includes(record.frontMat.color), 'front line color must follow the theme');
   assert.ok(record.frontMat.opacity >= 0.9, 'front line must be near-opaque');
-  // Labels cover every visible point minus whatever screen-space collision
-  // arbitration or viewport clipping had to drop. The name belongs to the base
-  // model (labeled at most once, effort-only lines on its other points), and
-  // effort belongs to the point, so the checkable invariants are relational:
-  // rendered labels ⊆ visible models, names unique per base model, and the
-  // name/effort split matches the data-model suffix.
-  const named = record.labels.filter(l => l.tspans.length === 2);
-  const nameTexts = named.map(l => l.tspans[0]);
-  assert.equal(new Set(nameTexts).size, nameTexts.length, 'a model name must be labeled at most once');
-  for (const l of record.labels) {
-    assert.ok(record.expected.includes(l.name), `label ${l.name} must be a visible model`);
-    assert.ok(l.tspans.length === 1 || l.tspans.length === 2, `label ${l.name} must have one or two lines`);
-    assert.equal(l.tspans.at(-1), l.effort, `label ${l.name} effort line must match effortOf`);
-  }
-  assert.deepEqual(record.flagFailures, [], 'front badges must use the same frontier');
-  assert.deepEqual(record.overlaps, [], 'SVG label rectangles must not overlap');
-  // Name coverage: every visible base model is either named or explicitly
-  // dropped by collision/clipping; the reported set must equal the DOM.
-  assert.ok(record.coverage, 'page must report label coverage');
-  const domNames = [...new Set(record.labels.filter(l => l.tspans.length === 2).map(l => l.tspans[0]))].sort();
-  assert.deepEqual([...new Set(record.coverage.named)].sort(), domNames, 'reported named set must equal DOM name set');
-  assert.deepEqual([...new Set([...record.coverage.named, ...record.coverage.dropped])].sort(), [...new Set(record.baseKeys)].sort(),
-    'every visible base model must be named or explicitly dropped');
-  // Point-level coverage: at least 3/4 of distinct anchors carry a label, so
-  // effort tags cannot silently vanish even when points coincide.
-  if (!relaxedBounds) assert.ok(record.labeledAnchors >= record.anchors * 0.75,
-    `too few labeled anchors: ${record.labeledAnchors}/${record.anchors}`);
-  // Bounded omission rule: dense clusters can physically exhaust label space.
-  // Every omission must be reported (named ∪ dropped == visible base models),
-  // and drops must stay rare: frontier names ≤ 25% of the frontier, all drops
-  // ≤ 15% of visible base models (floor, so a small frontier cannot lose its
-  // only name). Hover tooltip is the fallback entry for dropped names.
-  const droppedFront = record.coverage.dropped.filter(bk => record.frontBase.includes(bk));
-  if (!relaxedBounds) {
-    assert.ok(droppedFront.length <= Math.floor(record.frontBase.length * 0.25),
-      `too many frontier names dropped: ${droppedFront.join(', ')}`);
-    assert.ok(record.coverage.dropped.length <= Math.floor(record.baseKeys.length * 0.15),
-      `too many model names dropped: ${record.coverage.dropped.join(', ')}`);
-  }
+  assert.equal(record.labels.length, 0, 'default labels must be hover-only');
   // Labels must stay clear of axis ticks, axis titles and the state strip.
   const axisIntrusions = [];
   const intrusionDetail = [];
@@ -230,7 +202,18 @@ try {
           .sort((a, b) => costOf(a) - costOf(b));
         snapshots.push({ mode, sorted: [...world.rows].sort((a, b) => costOf(a) - costOf(b)).map(m => m.model), members: members.map(m => m.model),
           line: Array.from(world.frontLines.cost[0].geometry.attributes.position.array),
-          expectedLine: members.flatMap(m => { const p = toWorld(m).toArray(); p[2] = -0.02; return p; }),
+          expectedLine: (() => {
+            const coords = world.rows.map(m => toWorld(m).toArray());
+            const xs = [...new Set(coords.map(p => p[0]))].sort((a,b) => a-b), out = [];
+            let left = 0;
+            for (const x of xs) {
+              const y = Math.max(...coords.filter(p => p[0] >= x).map(p => p[1]));
+              if (!out.length || out.at(-1)[1] !== y) out.push([left,y]);
+              if (out.at(-1)[0] !== x) out.push([x,y]);
+              left = x;
+            }
+            return out.flatMap(([x,y]) => [x,y,-0.02]);
+          })(),
           labels: [...labelLayer.querySelectorAll('g[data-front="true"]')].map(g => g.dataset.model).sort() });
       }
       return { snapshots, restored: true, rawCount: ROWS_RAW.length, modelsCount: savedModels.length };
@@ -244,7 +227,7 @@ try {
   assert.deepEqual(fixture.snapshots[0].members, ['Regression A', 'Regression B', 'Regression C']);
   assert.deepEqual(fixture.snapshots[1].members, ['Regression C']);
   for (const r of fixture.snapshots) {
-    assert.deepEqual(r.labels, [...r.members].sort());
+    assert.deepEqual(r.labels, [], 'fixtures must not add default frontier labels');
     assert.equal(r.line.length, r.expectedLine.length);
     assert.ok(r.line.every((v, i) => Math.abs(v - r.expectedLine[i]) < 2e-5));
   }
@@ -270,7 +253,7 @@ try {
   await page.click('button[data-view="3d"]');
   await settle();
   assert.equal(await page.evaluate(() => labelLayer.children.length), 0, '3D view must clear 2D labels');
-  assert.equal(await page.evaluate(() => window.__labelCoverage), null, '3D view must invalidate coverage stats');
+  assert.equal(await page.evaluate(() => labelLayer.children.length), 0, '3D defaults remain hover-only');
   await page.click('button[data-view="cost"]');
   await settle();
   verify(await inspect());
@@ -298,7 +281,7 @@ try {
   verify(await inspect());
   check('narrow viewport relayout', {});
 
-  deniedPage = await task.newPage();
+  deniedPage = page;
   const injection = await deniedPage.cdp('Page.addScriptToEvaluateOnNewDocument', { source: `
     window.__mklErrors=[];
     addEventListener('error',e=>window.__mklErrors.push(e.message));
@@ -324,7 +307,7 @@ try {
   await deniedPage.reload(); await ready(deniedPage);
   const deniedReloaded = await deniedPage.evaluate(() => ({ plans: S.subscriptionPlans, mix: S.mix, defaultMix: PRICING.DEFAULT_MIX, errors: window.__mklErrors }));
   assert.deepEqual(deniedReloaded.plans, {}); assert.deepEqual(deniedReloaded.mix, deniedReloaded.defaultMix); assert.deepEqual(deniedReloaded.errors, []);
-  check('separate page CDP preload denies storage; read/write/reload remain functional', { page: deniedPage.label, deniedInitial, deniedChanged, deniedReloaded });
+  check('same p1 CDP preload denies storage; read/write/reload remain functional', { page: deniedPage.label, deniedInitial, deniedChanged, deniedReloaded });
   report.passed = true;
 } catch (error) {
   report.failure = { message: error.message, stack: error.stack, lastRecord: lastRecord ? { coverage: lastRecord.coverage, frontBase: lastRecord.frontBase, labels: lastRecord.labels.length, view: lastRecord.view, metric: lastRecord.metric, mode: lastRecord.mode, viewport: lastRecord.viewport, plan: lastRecord.plan, intrusionDetail: lastRecord.intrusionDetail, sig: null } : null };
@@ -333,7 +316,8 @@ try {
   try {
     if (deniedPage) {
       if (preload) await deniedPage.cdp('Page.removeScriptToEvaluateOnNewDocument', { identifier: preload });
-      await deniedPage.close();
+      await deniedPage.reload();
+      await ready(deniedPage);
     }
     if (original) await page.evaluate(saved => {
       for (const item of saved.storage) if (!item.unavailable) {
