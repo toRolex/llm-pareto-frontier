@@ -8,6 +8,8 @@ const spaceId = Number(process.env.MKL_SPACE_ID);
 assert.ok(Number.isInteger(spaceId) && spaceId > 0, 'MKL_SPACE_ID must name the existing TaskSpace');
 const task = await taskSpace(spaceId);
 const page = task.page('p1');
+// 固定标准验收尺寸：CDP override 会跨运行残留，窄视口只能出现在显式场景里
+await page.cdp('Emulation.setDeviceMetricsOverride', { width: 1470, height: 837, deviceScaleFactor: 2, mobile: false });
 const directory = '/tmp/mkl-redesign-backup';
 await fs.mkdir(directory, { recursive: true });
 const report = { spaceId, startedAt: new Date().toISOString(), checks: [], passed: false };
@@ -15,10 +17,11 @@ let original, deniedPage, preload;
 const check = (name, evidence) => report.checks.push({ name, evidence });
 const ready = async p => {
   await p.waitForFunction(() => typeof world !== 'undefined' && world && typeof labelLayer !== 'undefined');
-  await p.waitForFunction(() => !flight);
+  await p.waitForFunction(() => !flight && (!Motion || sampleMotion(Motion, performance.now()).done));
 };
 const settle = async () => {
-  await page.waitForFunction(() => !flight);
+  // 2D 场景必须等到标签层按当前视口重算（flight 期间签名被清空，落地后才重建）
+  await page.waitForFunction(() => !flight && (!Motion || sampleMotion(Motion, performance.now()).done));
   await page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
 };
 
@@ -30,59 +33,82 @@ const inspect = () => page.evaluate(() => {
   const value = m => axis === 'cost' ? costOf(m) : m.tok;
   const front = rows.filter(a => !rows.some(b => b !== a && value(b) <= value(a) && b.val >= a.val && (value(b) < value(a) || b.val > a.val)))
     .sort((a, b) => value(a) - value(b));
-  const expected = [...new Set([...front, ...[...rows].sort((a, b) => b.val - a.val).slice(0, 10)].map(m => m.model))].sort();
+  const expected = rows.map(m => m.model).sort();
   const groups = [...document.querySelectorAll('#labels g[data-model]')];
-  const labels = groups.map(g => ({ name: g.dataset.model, front: g.dataset.front === 'true', box: (() => {
-    const b = g.querySelector('rect').getBBox(); return { x: b.x, y: b.y, w: b.width, h: b.height };
-  })() }));
+  // Overlap is a text concern: the connector line converges on the anchor, so
+  // coincident effort points of one model always overlap at group level.
+  const labels = groups.map(g => { const tspans = [...g.querySelectorAll('tspan')].map(t => t.textContent); const r = g.querySelector('text').getBoundingClientRect(); return { name: g.dataset.model, front: g.dataset.front === 'true', tspans, effort: effortOf(g.dataset.model), box: { x: r.x, y: r.y, w: r.width, h: r.height } }; });
   const overlaps = [];
   for (let i = 0; i < labels.length; i++) for (let j = i + 1; j < labels.length; j++) {
     const a = labels[i].box, b = labels[j].box;
     if (a.x < b.x + b.w && a.x + a.w > b.x && a.y < b.y + b.h && a.y + a.h > b.y) overlaps.push([labels[i].name, labels[j].name]);
   }
-  const normalize = (v, max, min, scale) => v === 0 ? 1 : scale === 'log' ? (Math.log(max) - Math.log(v)) / (Math.log(max) - Math.log(min)) : (max - v) / (max - min);
-  const position = m => [normalize(costOf(m), DOM.costMax, DOM.costMin, S.costScale) * W.w,
+  const normalize = (v, max, min, scale, values) => {
+    if (scale !== 'log') return (max - v) / (max - min);
+    const positive = values.filter(v => v > 0), pivot = positive.length ? Math.min(...positive) : 1;
+    const transform = min === 0 ? v => Math.log1p(v / pivot) : Math.log;
+    return (transform(max) - transform(v)) / (transform(max) - transform(min));
+  };
+  const position = m => [normalize(costOf(m), DOM.costMax, DOM.costMin, S.costScale, rows.map(costOf)) * W.w,
     (m.val - DOM.idxMin) / (DOM.idxMax - DOM.idxMin) * W.d,
-    normalize(m.tok, DOM.tokMax, DOM.tokMin, S.tokScale) * W.h];
+    normalize(m.tok, DOM.tokMax, DOM.tokMin, S.tokScale, rows.map(m => m.tok)) * W.h];
   const pointFailures = world.sprites.filter(sp => !sp.position.toArray().every((v, i) => close(v, position(sp.userData.model)[i])))
     .map(sp => sp.userData.model.model);
-  const expectedLine = front.flatMap(m => { const p = position(m); p[axis === 'cost' ? 2 : 0] = -0.02; return p; });
+  const component = axis === 'cost' ? 0 : 2;
+  const axisValue=m=>axis === 'cost' ? costOf(m) : m.tok;
+  const frontier=rows.filter(a=>!rows.some(b=>axisValue(b)<=axisValue(a) && b.val>=a.val && (axisValue(b)<axisValue(a) || b.val>a.val)));
+  const sorted=frontier.map(position).map(p=>[p[component],p[1]]).sort((a,b)=>a[0]-b[0] || a[1]-b[1]);
+  const stairs=sorted.filter((p,i)=>!i || p[0]!==sorted[i-1][0] || p[1]!==sorted[i-1][1]);
+  const expectedLine = stairs.flatMap(([x, y]) => axis === 'cost' ? [x, y, -0.02] : [-0.02, y, x]);
   const actualLine = Array.from(world.frontLines[axis][0].geometry.attributes.position.array);
   const lineMatches = actualLine.length === expectedLine.length && actualLine.every((v, i) => close(v, expectedLine[i]));
   const flagFailures = labels.filter(l => l.front !== front.some(m => m.model === l.name)).map(l => l.name);
+  // Front line must stay a solid, theme-colored line (regression guard against
+  // the old faint dashed style).
+  const frontMat = (() => { const m = world.frontLines[axis][0].material;
+    return { dashed: m.isLineDashedMaterial === true, color: m.color.getHexString(), opacity: m.opacity }; })();
+  // Point-level coverage: distinct projected anchors, and how many carry a label.
+  const anchorOf = m => { const p = toWorld(m).project(camera2); return `${Math.round((p.x + 1) * innerWidth / 2)}@${Math.round((1 - p.y) * innerHeight / 2)}`; };
+  const anchors = new Set(rows.map(anchorOf));
+  const labeledAnchors = new Set(groups.map(g => anchorOf(rows.find(m => m.model === g.dataset.model))));
+  const viewport = { w: innerWidth, h: innerHeight };
+  // Axis-region audit: per-sprite rects, same math as the page.
+  const pxPerWorld = innerHeight / (camera2.top - camera2.bottom);
+  const axisRects = [];
+  world.group.traverse(o => { if (!o.isSprite || !o.userData.axis) return;
+    const p = o.position.clone().project(camera2);
+    const cx = (p.x + 1) * innerWidth / 2, cy = (1 - p.y) * innerHeight / 2;
+    const hw = o.scale.x * pxPerWorld / 2 + 10, hh = o.scale.y * pxPerWorld / 2 + 8;
+    axisRects.push({ x: cx - hw, y: cy - hh, w: hw * 2, h: hh * 2 }); });
+  const stateRect = document.getElementById('state').getBoundingClientRect();
+  if (stateRect.height > 0) axisRects.push({ x: stateRect.x, y: stateRect.y, w: stateRect.width, h: stateRect.height });
   return { view: S.view, metric: METRICS[S.metric].key, mode: S.priceMode, plan: S.subscriptionPlans.OpenAI || null,
-    errors: window.__mklRedesignErrors || [], perTask: S.perTask, points: world.sprites.length, pointFailures, lineMatches, actualLine, expectedLine,
-    front: front.map(m => m.model), sorted: [...rows].sort((a, b) => value(a) - value(b)).map(m => m.model),
+    errors: window.__mklRedesignErrors || [], boxedLabels: document.querySelectorAll('#labels rect').length, perTask: S.perTask, points: world.sprites.length, pointFailures, lineMatches, actualLine, expectedLine,
+    front: front.map(m => m.model), frontBase: [...new Set(front.map(m => baseKey(m.model)))], baseKeys: rows.map(m => baseKey(m.model)),
+    coverage: window.__labelCoverage, axisRects, viewport, frontMat, anchors: anchors.size, labeledAnchors: labeledAnchors.size,
+    sorted: [...rows].sort((a, b) => value(a) - value(b)).map(m => m.model),
     expected, labels, overlaps, flagFailures, costs: rows.map(m => ({ name: m.model, cost: costOf(m), tok: m.tok })) };
 });
-function verify(record) {
+let lastRecord = null;
+function verify(record, { relaxedBounds = false } = {}) {
+  lastRecord = record;
   assert.deepEqual(record.errors, [], 'scenario must have no runtime errors');
+  assert.equal(record.boxedLabels, 0, 'labels must be text without boxes');
   assert.ok(record.points > 0, 'scenario must render points');
 
   assert.deepEqual(record.pointFailures, [], 'points must use effective costOf');
   assert.equal(record.lineMatches, true, 'front line must match independent effective-price/token frontier and ordering');
-  // Labels are the frontier ∪ Top10 minus whatever screen-space collision
-  // arbitration or viewport clipping had to drop. Coincident points (same val
-  // and cost — one model's effort tiers) stack at one anchor, and the newest
-  // live data makes such stacks dense, so exact-set equality is data-sensitive.
-  // Relational form instead: rendered labels ⊆ expected, and every expected
-  // label whose anchor point is unique must be rendered.
-  const dropped = record.expected.filter(e => !record.labels.some(l => l.name === e));
-  // Coincidence is view-dependent: cost view projects (cost, val), tok view (tok, val).
-  const axisOf = c => record.view === 'tok' ? c.tok : c.cost;
-  const anchorOf = name => { const c = record.costs.find(c => c.name === name); return c ? `${axisOf(c)}@${c.val ?? ''}` : null; };
-  const coincident = new Set();
-  for (const a of record.costs) for (const b of record.costs)
-    if (a.name !== b.name && axisOf(a) === axisOf(b)) { coincident.add(a.name); coincident.add(b.name); }
-  for (const e of dropped) {
-    const rival = anchorOf(e) !== null && record.expected.some(o => o !== e && anchorOf(o) === anchorOf(e));
-    assert.ok(coincident.has(e) || rival,
-      `label ${e} was dropped but its anchor is not coincident with another expected label`);
-  }
-  assert.ok(record.labels.every(l => record.expected.includes(l.name)),
-    'rendered labels must be a subset of frontier union Top10');
-  assert.deepEqual(record.flagFailures, [], 'front badges must use the same frontier');
-  assert.deepEqual(record.overlaps, [], 'SVG label rectangles must not overlap');
+  assert.equal(record.frontMat.dashed, false, 'front line must be solid, not dashed');
+  assert.ok(['66d9a8', '2e7358'].includes(record.frontMat.color), 'front line color must follow the theme');
+  assert.ok(record.frontMat.opacity >= 0.9, 'front line must be near-opaque');
+  assert.equal(record.labels.length, 0, 'default labels must be hover-only');
+  // Labels must stay clear of axis ticks, axis titles and the state strip.
+  const axisIntrusions = [];
+  const intrusionDetail = [];
+  for (const l of record.labels) for (const a of record.axisRects)
+    if (l.box.x < a.x + a.w && l.box.x + l.box.w > a.x && l.box.y < a.y + a.h && l.box.y + l.box.h > a.y) { axisIntrusions.push(l.name); intrusionDetail.push({ name: l.name, box: l.box, hit: a }); }
+  record.intrusionDetail = intrusionDetail;
+  assert.deepEqual(axisIntrusions, [], 'labels must not overlap axis ticks, titles or the state strip');
 }
 try {
   await ready(page);
@@ -115,7 +141,7 @@ try {
   await page.evaluate(() => {
     S.metric = 0; S.perTask = false; S.subscriptionPlans = {}; S.mix = { ...PRICING.DEFAULT_MIX };
     pricingPanel.classList.add('hidden'); cfgEl.classList.add('hidden');
-    renderPricingPanel(); recomputeDom(); rebuild(); applyView('cost', true);
+    renderPricingPanel(); rebuild(); applyView('cost', true);
   });
   for (const plan of [null, 'plus']) {
     await page.click('button[data-pricing]');
@@ -166,18 +192,20 @@ try {
       fixtures.forEach(m => selected.set(baseKey(m.model), new Set([effortOf(m.model)])));
       S.metric = 0; S.perTask = false; S.subscriptionPlans = {}; S.view = 'cost';
       for (const mode of ['in', 'out']) {
-        S.priceMode = mode; recomputeDom(); rebuild(); applyView('cost', true);
+        S.priceMode = mode; rebuild(); applyView('cost', true); sampleDataMotion(performance.now() + MOTION_MS);
         const members = world.rows.filter(a => !world.rows.some(b => b !== a && costOf(b) <= costOf(a) && b.val >= a.val && (costOf(b) < costOf(a) || b.val > a.val)))
           .sort((a, b) => costOf(a) - costOf(b));
         snapshots.push({ mode, sorted: [...world.rows].sort((a, b) => costOf(a) - costOf(b)).map(m => m.model), members: members.map(m => m.model),
           line: Array.from(world.frontLines.cost[0].geometry.attributes.position.array),
-          expectedLine: members.flatMap(m => { const p = toWorld(m).toArray(); p[2] = -0.02; return p; }),
+          expectedLine: (() => {
+            return members.map(m => toWorld(m).toArray()).sort((a,b) => a[0]-b[0]).flatMap(([x,y]) => [x,y,-0.02]);
+          })(),
           labels: [...labelLayer.querySelectorAll('g[data-front="true"]')].map(g => g.dataset.model).sort() });
       }
       return { snapshots, restored: true, rawCount: ROWS_RAW.length, modelsCount: savedModels.length };
     } finally {
       MODELS.splice(0, MODELS.length, ...savedModels); selected.clear(); savedSelected.forEach(([k, v]) => selected.set(k, v));
-      Object.assign(S, savedS); recomputeDom(); rebuild(); applyView(S.view, true);
+      Object.assign(S, savedS); rebuild(); applyView(S.view, true);
     }
   });
   assert.deepEqual(fixture.snapshots[0].sorted, ['Regression A', 'Regression B', 'Regression C']);
@@ -185,7 +213,7 @@ try {
   assert.deepEqual(fixture.snapshots[0].members, ['Regression A', 'Regression B', 'Regression C']);
   assert.deepEqual(fixture.snapshots[1].members, ['Regression C']);
   for (const r of fixture.snapshots) {
-    assert.deepEqual(r.labels, [...r.members].sort());
+    assert.deepEqual(r.labels, [], 'fixtures must not add default frontier labels');
     assert.equal(r.line.length, r.expectedLine.length);
     assert.ok(r.line.every((v, i) => Math.abs(v - r.expectedLine[i]) < 2e-5));
   }
@@ -207,7 +235,39 @@ try {
   assert.deepEqual(runtimeErrors, []);
   check('all 22 label scenarios runtime errors empty', runtimeErrors);
 
-  deniedPage = await task.newPage();
+  // 3D round trip through real view clicks: labels must clear and rebuild.
+  await page.click('button[data-view="3d"]');
+  await settle();
+  assert.equal(await page.evaluate(() => labelLayer.children.length), 0, '3D view must clear 2D labels');
+  assert.equal(await page.evaluate(() => labelLayer.children.length), 0, '3D defaults remain hover-only');
+  await page.click('button[data-view="cost"]');
+  await settle();
+  verify(await inspect());
+  check('3D round trip via real view clicks', {});
+
+  // Light theme through a real click: labels and frontier line re-derive.
+  await page.click('#theme-switch button[data-theme="light"]');
+  await settle();
+  verify(await inspect());
+  await page.screenshot({ path: '/tmp/mkl-redesign-backup/labels-light.png' });
+  await page.click('#theme-switch button[data-theme="dark"]');
+  await settle();
+  verify(await inspect());
+  check('light/dark theme via real clicks', {});
+
+  // Narrow viewport: axis bands, collision and coverage must re-derive.
+  // CDP 模拟尺寸不触发 window resize，手动派发以走页面真实 resize 处理器
+  await page.cdp('Emulation.setDeviceMetricsOverride', { width: 1100, height: 700, deviceScaleFactor: 1, mobile: false });
+  await page.evaluate(() => dispatchEvent(new Event('resize')));
+  await settle();
+  verify(await inspect(), { relaxedBounds: true });
+  await page.cdp('Emulation.clearDeviceMetricsOverride', {});
+  await page.evaluate(() => dispatchEvent(new Event('resize')));
+  await settle();
+  verify(await inspect());
+  check('narrow viewport relayout', {});
+
+  deniedPage = page;
   const injection = await deniedPage.cdp('Page.addScriptToEvaluateOnNewDocument', { source: `
     window.__mklErrors=[];
     addEventListener('error',e=>window.__mklErrors.push(e.message));
@@ -233,16 +293,17 @@ try {
   await deniedPage.reload(); await ready(deniedPage);
   const deniedReloaded = await deniedPage.evaluate(() => ({ plans: S.subscriptionPlans, mix: S.mix, defaultMix: PRICING.DEFAULT_MIX, errors: window.__mklErrors }));
   assert.deepEqual(deniedReloaded.plans, {}); assert.deepEqual(deniedReloaded.mix, deniedReloaded.defaultMix); assert.deepEqual(deniedReloaded.errors, []);
-  check('separate page CDP preload denies storage; read/write/reload remain functional', { page: deniedPage.label, deniedInitial, deniedChanged, deniedReloaded });
+  check('same p1 CDP preload denies storage; read/write/reload remain functional', { page: deniedPage.label, deniedInitial, deniedChanged, deniedReloaded });
   report.passed = true;
 } catch (error) {
-  report.failure = { message: error.message, stack: error.stack };
+  report.failure = { message: error.message, stack: error.stack, lastRecord: lastRecord ? { coverage: lastRecord.coverage, frontBase: lastRecord.frontBase, labels: lastRecord.labels.length, view: lastRecord.view, metric: lastRecord.metric, mode: lastRecord.mode, viewport: lastRecord.viewport, plan: lastRecord.plan, intrusionDetail: lastRecord.intrusionDetail, sig: null } : null };
   process.exitCode = 1;
 } finally {
   try {
     if (deniedPage) {
       if (preload) await deniedPage.cdp('Page.removeScriptToEvaluateOnNewDocument', { identifier: preload });
-      await deniedPage.close();
+      await deniedPage.reload();
+      await ready(deniedPage);
     }
     if (original) await page.evaluate(saved => {
       for (const item of saved.storage) if (!item.unavailable) {
@@ -252,7 +313,7 @@ try {
       theme = saved.theme; document.documentElement.dataset.theme = theme; scene.background.setHex(palette().bg);
       document.querySelectorAll('#theme-switch button').forEach(b => b.classList.toggle('on', b.dataset.theme === theme));
       renderPricingPanel(); pricingPanel.classList.add('hidden'); cfgEl.classList.add('hidden');
-      recomputeDom(); rebuild(); applyView(S.view, true);
+      rebuild(); applyView(S.view, true);
       document.querySelectorAll('button[data-price]').forEach(b => b.classList.toggle('on', b.dataset.price === S.priceMode));
       document.querySelectorAll('button[data-metric]').forEach(b => b.classList.toggle('on', +b.dataset.metric === S.metric));
       document.querySelectorAll('button[data-pertask]').forEach(b => b.classList.toggle('on', S.perTask));
