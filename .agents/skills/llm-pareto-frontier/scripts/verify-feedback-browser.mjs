@@ -13,7 +13,7 @@ const frames = () => page.evaluate(() => new Promise(resolve => {
   requestAnimationFrame(tick);
 }));
 const settle = async () => {
-  await page.waitForFunction(() => world && !flight);
+  await page.waitForFunction(() => world && !flight && (!Motion || sampleMotion(Motion, performance.now()).done));
   await page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
 };
 const snapshot = () => page.evaluate(() => {
@@ -80,7 +80,7 @@ function verifyFrontier(s) {
   for (const id of p3) {
     const p = rows.find(p => p.id === id), coverage = s.frontier.coverage[id];
     assert.equal(coverage?.front3, true, `${id} P3 ledger`);
-    assert.equal(coverage?.boundary, true, `${id} boundary ledger`);
+    assert.equal(coverage?.geometryVertex, true, `${id} observed geometry vertex`);
     let hit = false;
     for (let i=0; i<surface.triangles.length; i+=3) {
       if (onTriangle(p.xyz, ...surface.triangles.slice(i,i+3).map(vertex))) { hit=true; break; }
@@ -90,6 +90,7 @@ function verifyFrontier(s) {
   }
   record(`P4/P3 metric ${s.metric} ${s.price}`, { expectedP4: oracle(rows,dimensions), actualP4:s.front, p3 });
 }
+const rowsFor2D = s => s.points.map(p=>({...p,speed:p.speed ?? -Infinity}));
 function verify2D(s) {
   assert.equal(s.flight, false);
   assert.equal(s.cameraType, 'OrthographicCamera');
@@ -97,17 +98,12 @@ function verify2D(s) {
   const normal = s.view === 'cost' ? 2 : 0;
   assert.ok(close(Math.abs(s.direction[normal]),1), 'cancelled flight must land on a true 2D plane');
   assert.ok(s.direction.every((v,i) => i === normal || close(v,0)), '2D camera must have no oblique component');
-  const xs = [...new Set(s.points.map(p => p.xyz[axis]))].sort((a,b) => a-b), stairs=[];
-  let left=0;
-  for (const x of xs) {
-    const y=Math.max(...s.points.filter(p => p.xyz[axis]>=x).map(p => p.xyz[1]));
-    if (!stairs.length || stairs.at(-1)[1]!==y) stairs.push([left,y]);
-    if (stairs.at(-1)[0]!==x) stairs.push([x,y]);
-    left=x;
-  }
+  const frontierIds=oracle(rowsFor2D(s),[[s.view === 'cost' ? 'cost' : 'tok',-1],['val',1]]);
+  const sorted=s.points.filter(p=>frontierIds.includes(p.id)).map(p=>[p.xyz[axis],p.xyz[1]]).sort((a,b)=>a[0]-b[0] || a[1]-b[1]);
+  const stairs=sorted.filter((p,i)=>!i || p[0]!==sorted[i-1][0] || p[1]!==sorted[i-1][1]);
   const expected=stairs.flatMap(([x,y]) => axis===0 ? [x,y,-0.02] : [-0.02,y,x]);
-  assert.equal(s.lines[s.view].length, expected.length, 'exact step line vertex count');
-  assert.ok(s.lines[s.view].every((v,i)=>close(v,expected[i])), 'independent exact staircase, not diagonal interpolation');
+  assert.equal(s.lines[s.view].length, expected.length, 'direct observed front2 vertex count');
+  assert.ok(s.lines[s.view].every((v,i)=>close(v,expected[i])), 'independent direct observed frontier, no inserted corners');
   const fill=s.fills[s.view];
   assert.ok(fill && fill.visible && fill.opacity>0 && fill.opacity<0.5, 'visible shallow above-frontier fill');
   const width=axis===0?s.worldSize.w:s.worldSize.h;
@@ -119,7 +115,7 @@ function verify2D(s) {
   for(const k of ['x','y','width','height']) assert.ok(close(fill.svgRect[k],s.p[k],0.01),`fill clip matches plot ${k}`);
   const equalPoint=(a,b)=>a.every((v,i)=>close(v,b[i],0.003));
   const cyclicEqual=(a,b)=>a.length===b.length&&a.some((_,offset)=>b.every((point,i)=>equalPoint(point,a[(i+offset)%a.length])));
-  assert.ok(cyclicEqual(actualPolygon,expectedPolygon)||cyclicEqual([...actualPolygon].reverse(),expectedPolygon),'SVG polygon exactly follows staircase and closes above it');
+  assert.ok(cyclicEqual(actualPolygon,expectedPolygon)||cyclicEqual([...actualPolygon].reverse(),expectedPolygon),'SVG polygon exactly follows direct frontier and closes above it');
   const areaOf=polygon=>Math.abs(polygon.reduce((sum,a,i)=>{const b=polygon[(i+1)%polygon.length];return sum+a[0]*b[1]-b[0]*a[1];},0))/2;
   const area=areaOf(actualPolygon),expectedArea=areaOf(expectedPolygon);
   assert.ok(close(area,expectedArea,0.02),'above fill exact polygon area');

@@ -5,7 +5,9 @@ console.log('Browser space '+task.spaceId);
 const page = task.page('p1');
 const dir = '/tmp/mkl-subscription-evidence';
 await fs.mkdir(dir, { recursive: true });
-const state = () => page.evaluate(() => ({
+const state = async () => {
+  await page.waitForFunction(() => !flight && (!Motion || sampleMotion(Motion, performance.now()).done));
+  return page.evaluate(() => ({
   mix: S.mix, plans: S.subscriptionPlans, mode: S.priceMode, view: S.view, perTask: S.perTask,
   errors: window.__errs2, requests: performance.getEntriesByType('resource').map(x => x.name),
   positions: world.sprites.map(s => s.position.toArray()), front: world.front.map(m => m.model),
@@ -14,13 +16,14 @@ const state = () => page.evaluate(() => ({
   error: document.getElementById('mix-error').textContent,
   stored: JSON.parse(localStorage.getItem('mkl-pricing-v1') || 'null'),
 }));
+};
 const records = [];
 await page.goto(process.env.MKL_BROWSER_URL || 'file:///Users/rolex/Documents/Codes/githubProject/MyProject/llm-pareto-frontier/.agents/skills/llm-pareto-frontier/prototype-4d-3d.html');
 await page.click('text="订阅价格"');
 await page.click('#plans-api');
 await page.click('#mix-defaults');
 const initial = await state();
-await page.selectOption('select[data-provider="OpenAI"]','pro200');
+await page.click('button[data-provider-button="OpenAI"][data-plan="pro200"]');
 const plan = await state();
 assert.ok(Math.abs(initial.sol / plan.sol - 10.4) < 1e-9);
 assert.notDeepEqual(plan.positions,initial.positions);
@@ -62,11 +65,11 @@ await page.click('text="$/task"'); assert.equal((await state()).perTask,true);
 await page.click('text="GDPval"');
 await page.click('text="Cost: log"');
 await page.click('text="Tok: log"');
-await page.click('text="Perf: 绝对值"');
-assert.equal(await page.evaluate(() => S.perfScale),'norm');
+assert.equal(await page.evaluate(() => document.querySelectorAll('button[data-scale="perf"]').length),0);
+assert.equal(await page.evaluate(() => 'perfScale' in S),false);
+assert.equal(await page.evaluate(() => world.rows.every(m => m.val === METRICS[S.metric].get(m))),true);
 await page.click('text="Cost: 线性"');
 await page.click('text="Tok: 线性"');
-await page.click('text="Perf: 归一"');
 await page.screenshot({path:`${dir}/cost-2d.png`});
 await page.click('text="Token–Metric (2D)"'); assert.equal((await state()).view,'tok');
 await page.click('text="3D"'); assert.equal((await state()).view,'3d');
@@ -74,16 +77,18 @@ await page.click('text="$/task"');
 await page.click('text="Index"');
 await page.click('text="订阅价格"');
 await page.click('#mix-defaults');
-await page.selectOption('select[data-provider="Anthropic"]','max20x200');
+await page.click('button[data-provider-button="Anthropic"][data-plan="max20x200"]');
 await page.screenshot({path:`${dir}/pricing-3d.png`});
 await page.click('#pricing-close');
+await state();
 const hoverPoint = await page.evaluate(() => {
   const sprite = world.sprites.find(s => s.userData.model.model.includes('Claude Sonnet 5.5'));
   const point = sprite.position.clone().project(activeCamera());
-  return {x:(point.x+1)*innerWidth/2,y:(1-point.y)*innerHeight/2};
+  const r=plotRect();
+  return {x:r.x+(point.x+1)*r.width/2,y:r.y+(1-point.y)*r.height/2};
 });
 await page.mouse.move(hoverPoint.x,hoverPoint.y,{label:'Inspect fitted subscription tooltip'});
-await page.waitForFunction(() => document.getElementById('tip').style.display === 'block');
+await page.waitForFunction(() => hoverState !== null);
 const tooltip = await page.evaluate(() => document.getElementById('tip').textContent);
 assert.match(tooltip,/API ÷/);
 assert.match(tooltip,/cache write|Cache write/);
@@ -96,4 +101,4 @@ records.push({stage:'2D frontier updates, modes, task, refresh and independent r
 await fs.writeFile(`${dir}/browser-results.json`,JSON.stringify(records,null,2));
 console.log('Browser behavior passed. Screenshots and results in '+dir);
 console.log(await page.snapshot());
-await task.finish({keep:[]});
+// The parent owns TaskSpace completion.

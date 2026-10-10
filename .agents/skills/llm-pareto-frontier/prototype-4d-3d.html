@@ -1,6 +1,6 @@
 <!DOCTYPE html>
 <!-- PROTOTYPE（定稿形态）— throwaway. 问题检验：4D 斩杀线最终交互形态
-     · 前沿面 = 4D Pareto 前沿节点在 cost×tok 平面 Delaunay 三角剖分连成（非插值包络）
+     · 前沿面 = 三轴 Pareto 观测节点在 cost×tok 平面 Delaunay 连面（仅视觉插值）
      · 视角切换：3D / Cost–Index / Token–Index（摄像机 0.8s 飞行，2D 落地锁定）
      · 双轴 log↔linear 独立切换；轴反向（原点=最差值，最远处=0，DeepSWE 风格）
      · 同模型 effort 档连线；configs 面板勾选模型 → 前沿实时重算
@@ -1076,6 +1076,7 @@
   #legend .ln { width:22px; height:0; border-top:2px solid; display:inline-block; }
   #state { position:absolute; left:20px; bottom:64px; z-index:10; font-size:12px; background:rgba(250,250,250,.9); padding:4px 8px; border-radius:6px; }
   #state b.red { color:#c00; }
+  #state[data-transition="切换中"]::after { content:" · 切换中，数值为目标数据"; }
   /* 底栏 pill 按钮组（对齐参考 repo .tab：radius 20px / border #ddd / hover 淡底） */
   #bar { position:fixed; left:0; right:0; bottom:0; background:#fff; border-top:1px solid #ddd;
          display:flex; gap:8px; padding:10px 16px; align-items:center; z-index:20; flex-wrap:wrap; }
@@ -1221,8 +1222,8 @@
 </head>
 <body>
 <header>
-  <h1>斩杀线 4D · 完整非支配配置与三轴阶梯包络</h1>
-  <div class="note">Metric ↑ · Cost ↓ · Output Tokens/Task ↓ · Tokens/s ↑。墨绿面是当前三轴已观测支配域的阶梯边界，不代表连续可实现模型。完整 4D 非支配配置描边保留。2D 浅色区为超出该预算已观测最佳性能的未达区域。</div>
+  <h1>斩杀线 4D · 完整非支配配置与观测前沿</h1>
+  <div class="note">Metric ↑ · Cost ↓ · Output Tokens/Task ↓ · Tokens/s ↑。墨绿面连接当前三轴非支配观测点。2D 线与浅色区共享直连顶点。线面插值仅为视觉指引，不代表连续可实现性能。所有实心点都是观测配置，外圈表示完整 4D 非支配资格，并非 hover 或当前二维前沿。</div>
 </header>
 <div id="theme-switch" aria-label="主题"><button data-theme="dark">暗</button><button data-theme="light">亮</button></div>
 <div class="chart" id="chart"></div>
@@ -1581,6 +1582,40 @@ function pareto(rows, dims) {
                dims.some(d => d.dir > 0 ? b[d.key] > a[d.key] : b[d.key] < a[d.key])));
 }
 // FRONTIER_DOMAIN_RUNTIME
+function delaunay(pts) {
+  const n = pts.length;
+  if (n < 3) return [];
+  const us = pts.map(p => p.u), vs = pts.map(p => p.v);
+  const minU = Math.min(...us), maxU = Math.max(...us), minV = Math.min(...vs), maxV = Math.max(...vs);
+  const dm = Math.max(maxU - minU, maxV - minV);
+  if (!dm) return [];
+  const P = pts.concat([{u:minU-20*dm,v:minV-20*dm}, {u:maxU+20*dm,v:minV-20*dm}, {u:(minU+maxU)/2,v:maxV+20*dm}]);
+  const area = (a,b,c) => (b.u-a.u)*(c.v-a.v)-(b.v-a.v)*(c.u-a.u);
+  const circum = (a,b,c) => {
+    const bu=b.u-a.u, bv=b.v-a.v, cu=c.u-a.u, cv=c.v-a.v;
+    const d=2*(bu*cv-bv*cu);
+    if (d === 0) return null;
+    const b2=bu*bu+bv*bv, c2=cu*cu+cv*cv;
+    const x=a.u+(cv*b2-bv*c2)/d, y=a.v+(bu*c2-cu*b2)/d;
+    return {x,y,r2:(a.u-x)**2+(a.v-y)**2};
+  };
+  let tris = [[n,n+1,n+2]];
+  for (let i=0;i<n;i++) {
+    const p=P[i], bad=[], edges=new Map();
+    for (const t of tris) {
+      const cc=circum(...t.map(k=>P[k]));
+      if (!cc || (p.u-cc.x)**2+(p.v-cc.y)**2 <= cc.r2) bad.push(t);
+    }
+    for (const t of bad) for (const [a,b] of [[t[0],t[1]],[t[1],t[2]],[t[2],t[0]]]) {
+      const k=a<b ? a+'_'+b : b+'_'+a;
+      if (edges.has(k)) edges.delete(k); else edges.set(k,[a,b]);
+    }
+    tris=tris.filter(t=>!bad.includes(t));
+    for (const [a,b] of edges.values()) if (area(P[a],P[b],p) !== 0) tris.push([a,b,i]);
+  }
+  return tris.filter(t=>t.every(k=>k<n) && area(...t.map(k=>P[k])) !== 0);
+}
+
 function computeFrontier(rows, project) {
   const dominates = (a, b, axes) => axes.every(f => f(a) >= f(b)) && axes.some(f => f(a) > f(b));
   const pareto = axes => rows.filter(b => !rows.some(a => dominates(a, b, axes)));
@@ -1591,76 +1626,44 @@ function computeFrontier(rows, project) {
   const front2Cost = pareto([cost, val]);
   const front2Tok = pareto([tok, val]);
   const points = rows.map(row => ({ row, xyz: project(row) }));
-  const positions = [], triangles = [], faces = [];
-  const vertex = xyz => { const index = positions.length / 3; positions.push(...xyz); return index; };
-  const quad = (kind, corners) => {
-    const indices = corners.map(vertex);
-    triangles.push(indices[0], indices[1], indices[2], indices[0], indices[2], indices[3]);
-    faces.push({ kind, corners });
-  };
-  const unique = values => [...new Set(values)].sort((a, b) => a - b);
-  const u = unique([-5, 5, ...points.map(p => p.xyz[0]).filter(x => x > -5 && x < 5)]);
-  const v = unique([-5, 5, ...points.map(p => p.xyz[2]).filter(x => x > -5 && x < 5)]);
-  const height = (x, z) => {
-    const feasible = points.filter(p => p.xyz[0] >= x && p.xyz[2] >= z);
-    return feasible.length ? Math.max(...feasible.map(p => p.xyz[1])) : null;
-  };
-  const cells = u.slice(1).map(x => v.slice(1).map(z => height(x, z)));
-  for (let i = 0; i < u.length - 1; i++) {
-    for (let j = 0; j < v.length - 1; j++) {
-      const x0 = u[i], x1 = u[i + 1], z0 = v[j], z1 = v[j + 1], y = cells[i][j];
-      if (y === null) continue;
-      quad('top', [[x0,y,z0], [x0,y,z1], [x1,y,z1], [x1,y,z0]]);
-      const right = cells[i + 1]?.[j] ?? null;
-      if (right !== null && y !== right) quad('step', [[x1,right,z0], [x1,y,z0], [x1,y,z1], [x1,right,z1]]);
-      const above = cells[i][j + 1] ?? null;
-      if (above !== null && y !== above) quad('step', [[x0,above,z1], [x1,above,z1], [x1,y,z1], [x0,y,z1]]);
-    }
+  const pointOf = row => points.find(p => p.row === row);
+  const slots = new Map();
+  for (const row of front3) {
+    const p=pointOf(row), key=JSON.stringify([p.xyz[0],p.xyz[2]]);
+    if (!slots.has(key) || slots.get(key).row.val < row.val) slots.set(key,p);
   }
-  const onFace = (xyz, { corners }) => [0,1,2].every(axis => {
-    const coordinates = corners.map(c => c[axis]);
-    return xyz[axis] >= Math.min(...coordinates) && xyz[axis] <= Math.max(...coordinates);
-  });
-  const interior4D = front4.filter(row => !front3.includes(row));
-  const coverage = Object.fromEntries(points.map(({ row, xyz }) => {
-    const inBounds = xyz[0] >= -5 && xyz[0] <= 5 && xyz[2] >= -5 && xyz[2] <= 5;
-    const envelopeBoundary = inBounds && xyz[1] === height(xyz[0], xyz[2]);
-    const face = faces.find(face => face.kind === 'top' && onFace(xyz, face))
-      ?? faces.find(face => face.kind === 'step' && onFace(xyz, face));
-    const boundaryPoint = !face && envelopeBoundary && front3.includes(row) && (xyz[0] === -5 || xyz[2] === -5);
-    if (boundaryPoint) vertex(xyz);
-    const classification = face?.kind ?? (boundaryPoint ? 'top' : 'interior');
-    const boundary = classification === 'top' || classification === 'step';
-    return [row.id, {
-      point: [...xyz],
-      aliases: points.filter(p => p.xyz.every((x, axis) => x === xyz[axis])).map(p => p.row.id),
-      boundary,
-      classification,
-      boundaryPoint,
-      front3: front3.includes(row),
-      front4: front4.includes(row),
-      reason: interior4D.includes(row) ? 'speed preserves full 4D nondomination; dominated in the displayed three axes' : boundary ? 'displayed envelope boundary' : 'dominated in the displayed three axes'
-    }];
-  }));
-  const staircase = axis => {
-    const xs = unique(points.map(p => p.xyz[axis]).filter(x => x >= -5 && x <= 5));
-    if (!xs.length) return [];
-    const boundary = [];
-    let left = -5;
-    for (const x of xs) {
-      const y = Math.max(...points.filter(p => p.xyz[axis] >= x).map(p => p.xyz[1]));
-      if (!boundary.length || boundary.at(-1)[1] !== y) boundary.push([left, y]);
-      if (boundary.at(-1)[0] !== x) boundary.push([x, y]);
-      left = x;
-    }
-    return boundary;
+  const vertices=[...slots.values()];
+  const tris=delaunay(vertices.map(p=>({u:p.xyz[0],v:p.xyz[2]})));
+  const edgeCounts=new Map();
+  for (const t of tris) for (const [a,b] of [[t[0],t[1]],[t[1],t[2]],[t[2],t[0]]]) {
+    const key=a<b ? a+'_'+b : b+'_'+a;
+    const edge=edgeCounts.get(key) || {indices:[a,b],count:0};
+    edge.count++; edgeCounts.set(key,edge);
+  }
+  let edges=[...edgeCounts.values()].filter(e=>e.count===1).map(e=>e.indices);
+  if (!tris.length) {
+    const order=vertices.map((_,i)=>i).sort((a,b)=>vertices[a].xyz[0]-vertices[b].xyz[0] || vertices[a].xyz[2]-vertices[b].xyz[2]);
+    edges=order.slice(1).map((i,k)=>[order[k],i]);
+  }
+  const direct = (front,axis) => {
+    const sorted=front.map(pointOf).sort((a,b)=>a.xyz[axis]-b.xyz[axis] || a.xyz[1]-b.xyz[1]);
+    return sorted.filter((p,i)=>!i || p.xyz[axis]!==sorted[i-1].xyz[axis] || p.xyz[1]!==sorted[i-1].xyz[1]).map(p=>[p.xyz[axis],p.xyz[1]]);
   };
-  return { front4, front3, front2Cost, front2Tok, surface: { positions, triangles, faces }, interior4D, coverage, stairs: { cost: staircase(0), tok: staircase(2) } };
+  const interior4D = front4.filter(row => !front3.includes(row));
+  const coverage = Object.fromEntries(points.map(({row,xyz})=>[row.id, {
+    point:[...xyz], aliases:points.filter(p=>p.xyz.every((x,i)=>x===xyz[i])).map(p=>p.row.id),
+    front3:front3.includes(row), front4:front4.includes(row),
+    geometryVertex:vertices.some(p=>p.xyz.every((x,i)=>x===xyz[i])),
+    reason:interior4D.includes(row) ? 'speed preserves full 4D nondomination; dominated in the displayed three axes' : front3.includes(row) ? 'observed three-axis frontier vertex; interpolation is a visual guide' : 'dominated in the displayed three axes'
+  }]));
+  return {front4,front3,front2Cost,front2Tok,interior4D,coverage,
+    surface:{positions:vertices.flatMap(p=>p.xyz),triangles:tris.flat(),edges,vertexIds:vertices.map(p=>p.row.id)},
+    lines:{cost:direct(front2Cost,0),tok:direct(front2Tok,2)}};
 }
 // END_FRONTIER_DOMAIN_RUNTIME
 
 // ---------- 全局状态 ----------
-const S = { view: "3d", costScale: "log", tokScale: "log", metric: 0, perfScale: "abs", priceMode: "blend", perTask: false,
+const S = { view: "3d", costScale: "log", tokScale: "log", metric: 0, priceMode: "blend", perTask: false,
   mix: savedPricing.mix, subscriptionPlans: savedPricing.plans };
 const MIX_FIELDS = [
   { key: "input", label: "Input", short: "in", row: "pin" },
@@ -1700,13 +1703,6 @@ const costOf = m => {
     : rates[PRICE_MODES.find(p => p.key === S.priceMode).field]?.rate ?? null;
   return typeof rate === "number" && S.perTask ? rate * m.tok / 1e6 : rate;
 };
-// 性能轴归一化层（spec 改动四）：S.perfScale = "abs" | "norm"。
-// norm(v) = v / max(可见行该指标值) × 100，max 每 rebuild 按当前可见行现算，每指标独立。
-// 归一化只作用于 y 轴读数（值域/投影/tooltip），Pareto 判定继续用原始 val——
-// 线性单调变换不改支配关系，两态下前沿一致。三条取值路径（metricsOf scale / arenaOf / index 直取）
-// 全部经 perfVal 收敛，不另开旁路。
-let perfMax = 100; // rebuild 时按可见行重算
-const perfVal = v => (v === null || v === undefined) ? v : (S.perfScale === "norm" ? v / perfMax * 100 : v);
 // DeepSWE 式筛选：baseKey → Set<effort>；默认全选
 const selected = new Map();
 for (const m of MODELS) {
@@ -1782,7 +1778,7 @@ const dl = new THREE.DirectionalLight(0xffffff, 0.6); dl.position.set(6, 10, 8);
 function resizePlot() {
   document.documentElement.style.setProperty("--bar-height", document.getElementById("bar").getBoundingClientRect().height+"px");
   const r=plotRect(); camera.aspect=r.width/r.height; camera.updateProjectionMatrix(); renderer.setSize(r.width,r.height);
-  sync2D(); if(flight) settleView(S.view); labelSignature="";
+  sync2D(); labelSignature="";
 }
 addEventListener("resize",resizePlot);
 
@@ -1809,10 +1805,7 @@ let iconScale = 1;     // slider 乘数（0.5–3）
 function buildWorld() {
   const mi = METRICS[S.metric];
   const valid = visible().filter(m => Number.isFinite(mi.get(m)) && Number.isFinite(m.tok) && m.tok > 0);
-  const rawVals = valid.map(mi.get);
-  perfMax = rawVals.length ? Math.max(...rawVals) : 100;
-  if (perfMax === 0) perfMax = 1;
-  const rows = valid.map(m => ({ ...m, id: m.creator + "|" + m.model, val: perfVal(mi.get(m)) }));
+  const rows = valid.map(m => ({ ...m, id: m.creator + "|" + m.model, val: mi.get(m) }));
   axes = {
     cost: createAxisDomain(rows.map(costOf), S.costScale),
     tok: createAxisDomain(rows.map(m => m.tok), S.tokScale),
@@ -1829,6 +1822,7 @@ function buildWorld() {
   const frontSet = new Set(front);
   const group = new THREE.Group();
   const sprites = [];
+  const handles = new Map();
   const effortLines = new Map(); // baseKey → THREE.Line[]（spec 改动三：hover 高亮用）
 
   // --- 地面网格 + 轴 + 刻度数字（userData.axis 标记归属视角，2D 时隐藏无关轴）---
@@ -1889,10 +1883,10 @@ function buildWorld() {
     sp.position.set(-0.5, xn.idx(v)*W.d, -0.45); sp.userData.axis = "both"; group.add(sp);
   }
   // 轴标题（纵轴标题跟随当前指标）
-  const title = (txt, pos, axis) => { const sp = textSprite(txt, { size: S.view === "3d" ? 34 : 26, scale: S.view === "3d" ? 1.25 : 1, color: palette().title }); sp.position.set(...pos); if (axis) sp.userData.axis = axis; group.add(sp); };
+  const title = (txt, pos, axis) => { const sp = textSprite(txt, { size: S.view === "3d" ? 34 : 26, scale: S.view === "3d" ? 1.25 : 1, color: palette().title }); sp.position.set(...pos); if (axis) sp.userData.axis = axis; sp.userData.axisTitle=true; group.add(sp); };
   // cost 轴标题双量纲：perTask 开 → 乘法结构亮出来（综合 × tok/task $/task）；关 → 单价 $/M tok
   title(`Cost ${PRICE_MODES.find(p => p.key === S.priceMode).label}${S.perTask ? " × tok/task $/task" : " $/M tok"} ← ${S.costScale === "log" ? "log" : "线性"}（原点最贵 → 远端最便宜）`, S.view === "3d" ? [W.w/2, -1.05, -0.9] : [W.w/2, -0.45, -0.4], "cost");
-  title(`${mi.label} ↑${S.perfScale === "norm" ? "（归一，最强=100）" : mi.unit ? " (" + mi.unit + ")" : ""}`, S.view === "3d" ? [-1.7, W.d/2, -0.85] : [-0.5, W.d/2 + 0.3, -0.45], "both");
+  title(`${mi.label} ↑${mi.unit ? " (" + mi.unit + ")" : ""}`, S.view === "3d" ? [-1.7, W.d/2, -0.85] : [-0.5, W.d/2 + 0.3, -0.45], "both");
   title(`Output Tokens/Task ← ${S.tokScale === "log" ? "log" : "线性"}（原点最多 → 远端最少）`, S.view === "3d" ? [-1.3, -0.85, W.h/2] : [-0.55, -0.45, W.h/2], "tok");
 
   const surface = frontier.surface;
@@ -1902,8 +1896,16 @@ function buildWorld() {
     const geo = new THREE.BufferGeometry();
     geo.setAttribute("position",new THREE.Float32BufferAttribute(positions,3));
     geo.setIndex(surface.triangles); geo.computeVertexNormals();
-    const mesh = new THREE.Mesh(geo,new THREE.MeshBasicMaterial({color:0x487265,transparent:true,opacity:0.15,side:THREE.DoubleSide,depthWrite:false}));
+    const mesh = new THREE.Mesh(geo,new THREE.MeshPhysicalMaterial({color:0x487265,transparent:true,opacity:0.28,side:THREE.DoubleSide,roughness:0.6,depthWrite:false}));
+    mesh.userData.motionIds=surface.vertexIds;
     mesh.userData.face=true; mesh.renderOrder=0; group.add(mesh);
+  }
+
+  if (surface.edges.length) {
+    const points=surface.edges.flatMap(edge=>edge.map(i=>fromDomain(surface.positions.slice(i*3,i*3+3))));
+    const boundary=new THREE.LineSegments(new THREE.BufferGeometry().setFromPoints(points),new THREE.LineDashedMaterial({color:0x487265,transparent:true,opacity:0.7,dashSize:0.18,gapSize:0.12}));
+    boundary.userData.motionIds=surface.edges.flatMap(edge=>edge.map(i=>surface.vertexIds[i]));
+    boundary.computeLineDistances(); boundary.userData.face=true; group.add(boundary);
   }
 
   // --- 同模型 effort 档连线（品牌色，原米色 #b0a48a 废弃）---
@@ -1921,6 +1923,7 @@ function buildWorld() {
     const lines = [];
     const coreM = new THREE.LineBasicMaterial({ color: col, transparent: true, opacity: 0.85 });
     const core = new THREE.Line(new THREE.BufferGeometry().setFromPoints(ms.map(m => toWorld(m))), coreM);
+    core.userData.motionIds=ms.map(m=>m.id);
     core.userData.baseKey = familyKey(ms[0]);
     lines.push(core); group.add(core);
     for (const ln of lines) { ln.userData.baseKey = core.userData.baseKey; (effortLines.get(core.userData.baseKey) ?? effortLines.set(core.userData.baseKey, []).get(core.userData.baseKey)).push(ln); }
@@ -1928,9 +1931,11 @@ function buildWorld() {
 
   const solidMat = () => new THREE.LineBasicMaterial({color:theme === "dark" ? 0x66d9a8 : 0x2e7358,transparent:true,opacity:0.95});
   const frontLine = axis => {
-    const points = frontier.stairs[axis].map(([x,y]) => axis === "cost" ? fromDomain([x,y,-5]) : fromDomain([-5,y,x]));
+    const points = frontier.lines[axis].map(([x,y]) => axis === "cost" ? fromDomain([x,y,-5]) : fromDomain([-5,y,x]));
     points.forEach(p => { if(axis === "cost") p.z=-0.02; else p.x=-0.02; });
     const l = new THREE.Line(new THREE.BufferGeometry().setFromPoints(points),solidMat());
+    l.userData.motionIds=frontier.lines[axis].map(([x,y])=>rows.find(m=>{const p=frontier.coverage[m.id].point;return p[axis==='cost' ? 0 : 2]===x && p[1]===y;}).id);
+    l.userData.projection=axis;
     l.userData.frontLine=true; group.add(l); return {rep:l,lines:[l]};
   };
   const fc=frontLine("cost"),ft=frontLine("tok");
@@ -1965,13 +1970,15 @@ function buildWorld() {
     sp.material.opacity = 0;
     const dot = new THREE.Mesh(new THREE.SphereGeometry(0.055, 12, 8), new THREE.MeshBasicMaterial({ color:col, transparent:true }));
     dot.position.copy(sp.position); dot.userData.model = m; dot.renderOrder=2; dot.material.depthTest=false;
+    const nodes=[dot,sp];
     if (frontSet.has(m)) {
       const ringCanvas=document.createElement("canvas");ringCanvas.width=ringCanvas.height=64;
       const rc=ringCanvas.getContext("2d");rc.strokeStyle=col;rc.lineWidth=5;rc.beginPath();rc.arc(32,32,27,0,Math.PI*2);rc.stroke();
       const ring=new THREE.Sprite(new THREE.SpriteMaterial({map:new THREE.CanvasTexture(ringCanvas),transparent:true,depthTest:false,opacity:0.95}));
-      ring.position.copy(sp.position);ring.scale.set(0.21*iconScale,0.21*iconScale,1);ring.userData.model=m;ring.renderOrder=3;group.add(ring);
+      ring.position.copy(sp.position);ring.scale.set(0.21*iconScale,0.21*iconScale,1);ring.userData.model=m;ring.userData.ring=true;ring.renderOrder=3;group.add(ring);nodes.push(ring);
     }
     group.add(dot); group.add(sp); sprites.push(sp);
+    handles.set(m.id,{nodes,sprite:sp,position:sp.position.clone()});
   }
 
   // --- hover 辅助线（v5 spec）：预建空 group，hover 时重填并显示，移出隐藏。
@@ -1982,7 +1989,10 @@ function buildWorld() {
   helperGroup.userData.helper = true;
   group.add(helperGroup);
 
-  return { group, sprites, frontSet, frontier, frontLines: { cost: fc.lines, tok: ft.lines }, front, rows, effortLines, helperGroup };
+  const topology=new THREE.Group();
+  for(const o of [...group.children]) if(o.userData.motionIds) {o.userData.motionOpacity=o.material.opacity;topology.add(o);}
+  group.add(topology);
+  return { group, handles, topology, sprites, frontSet, frontier, frontLines: { cost: fc.lines, tok: ft.lines }, front, rows, effortLines, helperGroup };
 }
 
 function disposeGroup(g) {
@@ -1992,10 +2002,72 @@ function disposeGroup(g) {
   });
 }
 
+// MOTION_RUNTIME
+const MOTION_MS = 240;
+const motionEase = k => k < 0.5 ? 4*k*k*k : 1-Math.pow(-2*k+2,3)/2;
+function sampleMotion(motion, now) {
+  const k = motion.duration ? Math.min(1,Math.max(0,(now-motion.t0)/motion.duration)) : 1;
+  const e = motionEase(k), points = new Map();
+  for (const [id,p] of motion.keyed) points.set(id,{position:p.from.map((v,i)=>v+(p.to[i]-v)*e),alpha:p.alphaFrom+(p.alphaTo-p.alphaFrom)*e});
+  const swap = k >= 0.5;
+  const topologyAlpha = motion.duration ? (swap ? motionEase((k-0.5)*2) : motion.shownAlpha*(1-motionEase(k*2))) : 1;
+  return {points,done:k===1,swap,topologyAlpha};
+}
+function createMotion(targetKey, targets, current, now, {reduced=false,shownAlpha=1}={}) {
+  const keyed=new Map();
+  for (const id of new Set([...current.keys(),...targets.keys()])) {
+    const old=current.get(id),to=targets.get(id);
+    if(!to && old.alpha===0) continue;
+    keyed.set(id,{from:old ? old.position.slice() : to.slice(),to:to ? to.slice() : old.position.slice(),alphaFrom:old ? old.alpha : 0,alphaTo:to ? 1 : 0});
+  }
+  return {targetKey,keyed,t0:now,duration:reduced ? 0 : MOTION_MS,shownAlpha};
+}
+function retargetMotion(motion,targetKey,targets,now,options) {
+  if(motion && motion.targetKey===targetKey) return motion;
+  const current=motion ? sampleMotion(motion,now).points : new Map();
+  return createMotion(targetKey,targets,current,now,options);
+}
+function sampleCameraPlan(plan,now) {
+  const k=plan.duration ? Math.min(1,Math.max(0,(now-plan.t0)/plan.duration)) : 1,e=motionEase(k);
+  return {position:plan.from.position.map((v,i)=>v+(plan.to.position[i]-v)*e),target:plan.from.target.map((v,i)=>v+(plan.to.target[i]-v)*e),fov:plan.from.fov+(plan.to.fov-plan.from.fov)*e,done:k===1};
+}
+function createCameraPlan(targetKey,from,to,now,reduced=false) {
+  return {targetKey,from:{position:from.position.slice(),target:from.target.slice(),fov:from.fov},to:{position:to.position.slice(),target:to.target.slice(),fov:to.fov},t0:now,duration:reduced ? 0 : MOTION_MS};
+}
+// END_MOTION_RUNTIME
+
+let Motion=null, shownTopology=null;
+const retirements=[];
+const reducedMotion=()=>matchMedia("(prefers-reduced-motion: reduce)").matches;
 function rebuild({ keepCamera = false } = {}) {
-  if (world) { scene.remove(world.group); disposeGroup(world.group); }
+  const now=performance.now();
+  sampleDataMotion(now);
+  const targetKey=JSON.stringify([S.metric,S.costScale,S.tokScale,S.priceMode,S.perTask,S.mix,S.subscriptionPlans,theme,visible().map(m=>[m.creator,m.model,costOf(m)])]);
+  if(Motion?.targetKey===targetKey) return;
+  const previous=world;
+  const current=Motion ? sampleMotion(Motion,now).points : new Map(previous ? [...previous.handles].map(([id,h])=>[id,{position:h.position.toArray(),alpha:1}]) : []);
   world = buildWorld();
+  const targets=new Map([...world.handles].map(([id,h])=>[id,h.position.toArray()]));
+  if(previous) {
+    for(const [id,h] of world.handles) {
+      const oldRing=previous.handles.get(id)?.nodes.find(o=>o.userData.ring);
+      let ring=h.nodes.find(o=>o.userData.ring);
+      if(!ring && oldRing) {ring=oldRing;world.group.add(ring);h.nodes.push(ring);ring.userData.retiringRing=true;}
+      if(ring) ring.userData.ringPlan={from:oldRing?.material.opacity ?? 0,to:ring.userData.retiringRing ? 0 : 0.95,t0:now};
+    }
+    for(const [id,h] of previous.handles) if(!world.handles.has(id) && current.get(id)?.alpha>0) {
+      h.nodes.forEach(o=>world.group.add(o));world.handles.set(id,h);
+    }
+    if(!shownTopology) shownTopology=previous.topology;
+    scene.add(shownTopology);
+    scene.remove(previous.group);
+    while(retirements.length) disposeGroup(retirements.pop());
+    retirements.push(previous.group);
+  } else shownTopology=world.topology;
+  Motion=createMotion(targetKey,targets,current,now,{reduced:!previous || reducedMotion(),shownAlpha:shownTopology.userData.alpha ?? 1});
+  if(shownTopology!==world.topology) world.topology.visible=false;
   scene.add(world.group);
+  sampleDataMotion(now);
   if (typeof tip !== "undefined") clearHover();
   if (keepCamera) {
     // 筛选/切轴/切指标：保留当前相机位姿，只同步 2D 连线可见性与轴归属（相机不动）
@@ -2003,12 +2075,62 @@ function rebuild({ keepCamera = false } = {}) {
     for (const ln of world.frontLines.cost) ln.visible = (S.view === "cost");
     for (const ln of world.frontLines.tok)  ln.visible = (S.view === "tok");
     setAxisVisibility(S.view);
-    if (flight) settleView(S.view);
-    else controls.enabled = !VIEWS[S.view].lock;
+    if (!cameraPlan) controls.enabled = !VIEWS[S.view].lock;
   } else applyView(S.view, true);
   updateLegend(); updateState(); updateCfgBtn();
+  sampleDataMotion(now);
   if (typeof labelLayer !== "undefined") updateLabels();
 }
+
+function sampleDataMotion(now) {
+  if(!Motion || !world) return;
+  const sample=sampleMotion(Motion,now);
+  if(sample.swap && shownTopology!==world.topology) {
+    shownTopology.userData.alpha=0;
+    scene.remove(shownTopology);retirements.push(shownTopology);
+    shownTopology=world.topology;shownTopology.visible=true;
+  }
+  for(const [id,h] of world.handles) {
+    const p=sample.points.get(id);if(!p) continue;
+    h.position.fromArray(p.position);
+    for(const o of h.nodes) {
+      o.position.copy(h.position);
+      if(o.userData.motionBase===undefined) o.userData.motionBase=o.material.opacity;
+      const base=o===h.sprite ? (hoverState && familyKey(o.userData.model)===hoverState.familyKey ? 1 : 0) : (hoverState && familyKey(o.userData.model)!==hoverState.familyKey ? 0.12 : o.userData.motionBase);
+      o.material.opacity=base*p.alpha;
+      if(o.userData.ringPlan) {
+        const r=o.userData.ringPlan,k=Motion.duration ? Math.min(1,(now-r.t0)/Motion.duration) : 1;
+        o.material.opacity=r.from+(r.to-r.from)*motionEase(k);
+      }
+      o.visible=p.alpha>0 && (!o.userData.ring || o.material.opacity>0);
+    }
+    if(sample.done) for(const o of [...h.nodes]) if(o.userData.retiringRing) {
+      world.group.remove(o);h.nodes=h.nodes.filter(n=>n!==o);
+      const g=new THREE.Group();g.add(o);retirements.push(g);
+    }
+    if(sample.done && !world.rows.some(m=>m.id===id)) {
+      h.nodes.forEach(o=>{world.group.remove(o);const g=new THREE.Group();g.add(o);retirements.push(g);});
+      world.handles.delete(id);
+    }
+  }
+  const topology=shownTopology;
+  topology.userData.alpha=sample.topologyAlpha;
+  topology.traverse(o=>{
+    const ids=o.userData.motionIds;if(!ids) return;
+    const attr=o.geometry.getAttribute('position');
+    ids.forEach((id,i)=>{const p=sample.points.get(id)?.position;if(!p) return;
+      attr.setXYZ(i,o.userData.projection==='tok' ? -0.02 : p[0],p[1],o.userData.projection==='cost' ? -0.02 : p[2]);});
+    attr.needsUpdate=true;o.geometry.computeBoundingSphere();
+    if(o.isMesh) o.geometry.computeVertexNormals();
+    if(o.computeLineDistances && o.material.isLineDashedMaterial) o.computeLineDistances();
+    o.material.opacity=o.userData.motionOpacity*sample.topologyAlpha;
+    o.visible=o.userData.face ? S.view==='3d' : o.userData.projection ? S.view===o.userData.projection : true;
+  });
+  world.group.traverse(o=>{if(o.isSprite && o.userData.axis && !o.userData.axisTitle) o.visible=sample.done && (S.view==='3d' || o.userData.axis==='both' || o.userData.axis===S.view);});
+  document.getElementById('state').dataset.transition=sample.done ? '' : '切换中';
+  if(!sample.done) world.helperGroup.visible=false;
+}
+function displayedPoint(m) {return world.handles.get(m.id)?.position.clone() || toWorld(m);}
 
 // ---------- 视角（3D / Cost–Index / Token–Index）----------
 // 世界坐标: x=cost(原点最贵) z=tok(原点最多) y=index。2D 视角 = 正交相机垂直看投影平面，可滚轮缩放/拖拽平移。
@@ -2020,8 +2142,8 @@ const VIEWS = {
   cost:   { pos: new THREE.Vector3(W.w/2, W.d/2, W.h + 40), tgt: new THREE.Vector3(W.w/2, W.d/2, 0), lock: true },  // 看 cost(x)×index(y)
   tok:    { pos: new THREE.Vector3(-40, W.d/2, W.h/2),      tgt: new THREE.Vector3(W.w, W.d/2, W.h/2),  lock: true },  // 看 tok(z)×index(y)
 };
+let cameraPlan = null;
 let flight = null;
-const ease = k => k < 0.5 ? 4*k*k*k : 1 - Math.pow(-2*k + 2, 3) / 2;
 
 // --- 正交 2D 相机 ---
 // 相机摆在平面中心正前，left/right/top/bottom 为相机空间半宽/半高（围绕 0 对称）
@@ -2052,26 +2174,36 @@ function sync2D() { if (S.view !== "3d") frame2D(S.view); }
 function activeCamera() { return (flight || S.view === "3d") ? camera : camera2; }
 
 function settleView(v) {
-  const vp=VIEWS[v]; flight=null; drag2D=null; zoomDistance=null;
+  const vp=VIEWS[v]; cameraPlan=null; flight=null; drag2D=null; zoomDistance=null;
   controls.dispose(); controls=new THREE.OrbitControls(camera,renderer.domElement); configureControls();
   controls.target.copy(vp.tgt); camera.position.copy(vp.pos); camera.fov=45; camera.lookAt(vp.tgt); camera.updateProjectionMatrix();
   camera2.position.copy(vp.pos); camera2.lookAt(vp.tgt); frame2D(v);
   controls.enabled=!vp.lock; controls.update();
 }
 function applyView(v, instant) {
-  const previous=S.view, wasPlanar=previous!=="3d" && !flight;
-  if(wasPlanar) { camera.position.copy(camera2.position); camera.quaternion.copy(camera2.quaternion); controls.target.copy(VIEWS[previous].tgt); }
+  const now=performance.now();
+  sampleCameraMotion(now);
+  if(!instant && S.view===v) return;
+  const previous=S.view, wasPlanar=previous!=="3d" && !cameraPlan;
+  if(wasPlanar) {
+    camera.position.copy(camera2.position); camera.quaternion.copy(camera2.quaternion);
+    const offset=new THREE.Vector3((camera2.left+camera2.right)/2,(camera2.top+camera2.bottom)/2,0).applyQuaternion(camera2.quaternion);
+    camera.position.add(offset);controls.target.copy(VIEWS[previous].tgt).add(offset);
+    camera.fov=2*Math.atan(cur2D.halfH/camera.position.distanceTo(controls.target))*180/Math.PI;camera.updateProjectionMatrix();
+  }
   S.view=v;
   if(world && (previous === "3d") !== (v === "3d")) rebuild({keepCamera:true});
-  clearHover(); drag2D=null; zoomDistance=null;
+  clearHover(); drag2D=null; zoomDistance=null;panX=0;panY=0;
   for(const ln of world.frontLines.cost) ln.visible=v==="cost";
   for(const ln of world.frontLines.tok) ln.visible=v==="tok";
   setAxisVisibility(v); frame2D(v);
-  if(instant) { orthoZoom=1;panX=0;panY=0;settleView(v); }
+  if(instant || reducedMotion()) { orthoZoom=1;panX=0;panY=0;settleView(v); }
   else {
     const {pos,tgt,lock}=VIEWS[v];
     const tf=v==="3d" ? 45 : 2*Math.atan(cur2D.halfH/pos.distanceTo(tgt))*180/Math.PI;
-    flight={t0:performance.now(),fp:camera.position.clone(),tp:pos.clone(),ft:controls.target.clone(),tt:tgt.clone(),ff:camera.fov,tf,lock};
+    const endOffset=v==='3d' ? new THREE.Vector3() : new THREE.Vector3(0,-W.d*0.09,0);
+    cameraPlan=createCameraPlan(v,{position:camera.position.toArray(),target:controls.target.toArray(),fov:camera.fov},{position:pos.clone().add(endOffset).toArray(),target:tgt.clone().add(endOffset).toArray(),fov:tf},now);
+    flight=cameraPlan;
     controls.enabled=false;
   }
   [...bar.querySelectorAll("button[data-view]")].forEach(b=>b.classList.toggle("on",b.dataset.view===v));
@@ -2096,15 +2228,32 @@ function setAxisVisibility(view) {
   });
 }
 
+function sampleCameraMotion(now) {
+  if(!cameraPlan) return;
+  const p=sampleCameraPlan(cameraPlan,now);
+  camera.position.fromArray(p.position);controls.target.fromArray(p.target);camera.fov=p.fov;
+  camera.updateProjectionMatrix();camera.lookAt(controls.target);
+  if(p.done) settleView(cameraPlan.targetKey);
+}
+function takeCameraOwnership() {
+  if(!cameraPlan) return;
+  sampleCameraMotion(performance.now());
+  if(!cameraPlan) return;
+  cameraPlan=null;flight=null;S.view='3d';zoomDistance=null;
+  const target=controls.target.clone();
+  controls.dispose();controls=new THREE.OrbitControls(camera,renderer.domElement);configureControls();
+  controls.target.copy(target);controls.enabled=true;
+  setAxisVisibility('3d');updateState();
+  [...bar.querySelectorAll('button[data-view]')].forEach(b=>b.classList.toggle('on',b.dataset.view==='3d'));
+}
 function animate() {
   (function loop() {
     requestAnimationFrame(loop);
-    if(flight) {
-      const k=Math.min(1,(performance.now()-flight.t0)/800),e=ease(k);
-      camera.position.lerpVectors(flight.fp,flight.tp,e); controls.target.lerpVectors(flight.ft,flight.tt,e);
-      camera.fov=flight.ff+(flight.tf-flight.ff)*e; camera.updateProjectionMatrix(); camera.lookAt(controls.target);
-      if(k>=1) settleView(S.view);
-    } else if(S.view==="3d") {
+    const now=performance.now();
+    while(retirements.length) disposeGroup(retirements.pop());
+    sampleDataMotion(now);
+    if(cameraPlan) sampleCameraMotion(now);
+    else if(S.view==="3d") {
       controls.update();
       if(zoomDistance!==null) {
         const delta=camera.position.clone().sub(controls.target),d=delta.length();
@@ -2119,12 +2268,13 @@ let drag2D=null;
 function setup2DControls() {
   const dom=renderer.domElement;
   dom.addEventListener("wheel",e=> {
-    e.preventDefault(); if(flight) return;
+    e.preventDefault(); takeCameraOwnership();
     const delta=e.deltaY*(e.deltaMode===1 ? 16 : e.deltaMode===2 ? plotRect().height : 1);
     if(S.view==="3d") zoomDistance=Math.min(100,Math.max(3,(zoomDistance ?? camera.position.distanceTo(controls.target))*Math.exp(delta*0.001)));
     else { orthoZoom=Math.min(20,Math.max(0.5,orthoZoom*Math.exp(-delta*0.001)));frame2D(S.view); }
   },{passive:false});
-  dom.addEventListener("mousedown",e=> { if(!flight && S.view!=="3d") drag2D={x:e.clientX,y:e.clientY}; });
+  dom.addEventListener('pointerdown',takeCameraOwnership,{capture:true});
+  dom.addEventListener("mousedown",e=> { takeCameraOwnership();if(S.view!=="3d") drag2D={x:e.clientX,y:e.clientY}; });
   addEventListener("mousemove",e=> {
     if(!drag2D || flight || S.view==="3d") return;
     const r=plotRect(),dx=(e.clientX-drag2D.x)/r.width*(camera2.right-camera2.left),dy=(e.clientY-drag2D.y)/r.height*(camera2.top-camera2.bottom);
@@ -2157,6 +2307,7 @@ function highlightEffort(hoverKey) {
     const isEffLine = ud.baseKey && world.effortLines.has(ud.baseKey); // 已由上方循环处理
     if (isEffLine) return;
     const isAxis = ud.axis, isFront = ud.frontLine || ud.face;
+    if(isFront && Motion && !sampleMotion(Motion,performance.now()).done) return;
     const isHit = ud.model && key !== null && familyKey(ud.model) === key;
     if (!isAxis && !isFront && !o.isSprite && !ud.model) return;
     if (o.isSprite && !ud.model) return; // 刻度/标题等文字 sprite 由 isAxis 分支管
@@ -2177,7 +2328,7 @@ function updateHelperLines(model) {
   const mat = () => new THREE.LineDashedMaterial({ color: new THREE.Color(col), transparent: true, opacity: 0.75, dashSize: 0.14, gapSize: 0.1 });
   const peers = world.rows.filter(m => familyKey(m) === familyKey(model));
   for (const m of peers) {
-    const p = toWorld(m);
+    const p = displayedPoint(m);
     const segs = S.view === "3d"
       ? [[p, new THREE.Vector3(0, p.y, p.z)], [p, new THREE.Vector3(p.x, 0, p.z)], [p, new THREE.Vector3(p.x, p.y, 0)]]
       : S.view === "cost"
@@ -2203,8 +2354,9 @@ function setHovered(sp) {
   updateHelperLines(m);
   const mi=METRICS[S.metric],mv=mi.get(m),uri=LOGOS[logoOf(m.model)]||"";
   setHTML(tip, `<div class="tip-head">${uri ? `<img src="${uri}">` : ""}<span class="tip-name">${esc(m.model)}</span></div><div class="tip-row">价格 <b>${fmtCost(costOf(m))}</b> ${S.perTask ? "/task" : "$ /M tok"}</div>`+pricingTooltip(m)+`<div class="tip-row">${mi.label} <b>${mv ?? "未测"}</b></div><div class="tip-row">${fmtTok(m.tok)} tok/task · ${m.speed ?? "未测"} tok/s</div><div class="front">${world.frontSet.has(m) ? "4D 非支配配置" : "非 4D 前沿"}</div>`);
+  if(Motion && !sampleMotion(Motion,performance.now()).done) tip.insertAdjacentHTML('beforeend','<div class="tip-row">切换中。数值为目标数据，点位尚在移动。</div>');
   const cov=world.frontier.coverage[m.id];
-  if(world.frontSet.has(m) && !cov.front3) tip.insertAdjacentHTML("beforeend",'<div class="front">速度优势保留完整 4D 非支配资格。当前三轴投影被支配，不必位于顶面。</div>');
+  if(world.frontSet.has(m) && !cov.front3) tip.insertAdjacentHTML("beforeend",'<div class="front">速度优势保留完整 4D 非支配资格。当前三轴投影被支配，不必位于当前三轴连面。</div>');
   const p=toWorld(m),axis=S.view==="tok" ? "z" : "x";
   const aliases=world.rows.filter(r=> { const q=toWorld(r);return S.view==="3d" ? q.equals(p) : q[axis]===p[axis] && q.y===p.y; });
   if(aliases.length>1) {
@@ -2217,8 +2369,9 @@ function setHovered(sp) {
 function pickAt(e) {
   const r=plotRect();mouse.x=(e.clientX-r.left)/r.width*2-1;mouse.y=-(e.clientY-r.top)/r.height*2+1;
   ray.setFromCamera(mouse,activeCamera());
-  const hits=ray.intersectObjects(world.sprites);
-  const project=m=> { const p=toWorld(m).project(activeCamera());return {x:(p.x+1)*r.width/2+r.left,y:(1-p.y)*r.height/2+r.top}; };
+  const pickable=[...world.handles.values()].map(h=>h.sprite).filter(sp=>sp.visible);
+  const hits=ray.intersectObjects(pickable);
+  const project=m=> { const p=displayedPoint(m).project(activeCamera());return {x:(p.x+1)*r.width/2+r.left,y:(1-p.y)*r.height/2+r.top}; };
   if(hits.length) {
     if(S.view!=="3d") hits.sort((a,b)=> {
       const pa=project(a.object.userData.model),pb=project(b.object.userData.model);
@@ -2233,7 +2386,7 @@ function pickAt(e) {
       const a=project(ms[i-1]),b=project(ms[i]),dx=b.x-a.x,dy=b.y-a.y,len=dx*dx+dy*dy;
       const t=len ? Math.min(1,Math.max(0,((e.clientX-a.x)*dx+(e.clientY-a.y)*dy)/len)) : 0;
       const d=Math.hypot(e.clientX-a.x-t*dx,e.clientY-a.y-t*dy);
-      if(d<distance) { distance=d;best=world.sprites.find(s=>s.userData.model===ms[t<0.5 ? i-1 : i]); }
+      if(d<distance) { distance=d;best=pickable.find(s=>s.userData.model===ms[t<0.5 ? i-1 : i]); }
     }
   }
   return best;
@@ -2460,11 +2613,6 @@ mkBtn("Tok: log", { scale: "tok" }).onclick = (e) => {
   e.target.textContent = "Tok: " + (S.tokScale === "log" ? "log" : "线性");
   rebuild({ keepCamera: true });
 };
-mkBtn("Perf: 绝对值", { scale: "perf" }).onclick = (e) => {
-  S.perfScale = S.perfScale === "abs" ? "norm" : "abs";
-  e.target.textContent = "Perf: " + (S.perfScale === "abs" ? "绝对值" : "归一");
-  rebuild({ keepCamera: true });
-};
 bar.insertAdjacentHTML("beforeend", `<span class="sep"></span>`);
 // 价格模式切换器（v5 spec：4 pill，cost 维取值口 costOf 随之切换 → rebuild 重算前沿）
 PRICE_MODES.forEach(({ key, label }) => {
@@ -2522,9 +2670,10 @@ function updateLegend() {
   const firstCreator = world.rows[0] ? world.rows[0].creator : "";
   const effCreator = (world.rows.find((m, i, arr) => arr.findIndex(x => x.creator === m.creator) === i) || {}).creator || "";
   setHTML(document.getElementById("legend"), `
-    <div class="row"><span class="ln" style="border-color:#66d9a8;"></span>2D 已观测前沿与上方未达区域</div>
-    <div class="row"><span style="width:22px;height:10px;background:#487265;opacity:0.5;"></span>当前三轴支配域阶梯面</div>
-    <div class="row"><span class="sw" style="background:${creatorColor(firstCreator)}"></span>模型（厂商色点 · hover 显示图标）</div>
+    <div class="row"><span class="ln" style="border-color:#66d9a8;"></span>2D 观测前沿直连与上方区域（仅视觉指引）</div>
+    <div class="row"><span style="width:22px;height:10px;background:#487265;opacity:0.5;"></span>三轴观测前沿连面（视觉插值）</div>
+    <div class="row"><span class="sw" style="background:${creatorColor(firstCreator)}"></span>实心点 = 观测配置（厂商色 · hover 显示图标）</div>
+    <div class="row"><span style="width:12px;height:12px;border:2px solid ${creatorColor(firstCreator)};border-radius:50%;"></span>外圈 = 完整 4D 非支配（非 hover / 非二维前沿）</div>
     <div class="row"><span class="ln" style="border-color:${creatorColor(effCreator)}; border-top-width:3px;"></span>同模型 effort 连线（加粗）</div>`);
 }
 
@@ -2534,11 +2683,13 @@ let labelSignature="",fillSignature="";
 function screenPoint(p,cam=activeCamera()) { const r=plotRect(),q=p.clone().project(cam);return [(q.x+1)*r.width/2,(1-q.y)*r.height/2]; }
 function updateFrontFill() {
   if(!world || S.view==="3d" || flight) {fillLayer.replaceChildren();fillSignature="";return;}
-  const r=plotRect(),stairs=world.frontier.stairs[S.view];
-  const pts=stairs.map(([x,y])=>screenPoint(S.view==="cost" ? fromDomain([x,y,-5]) : fromDomain([-5,y,x]),camera2));
-  const sig=JSON.stringify([S.view,r.width,r.height,pts]);if(sig===fillSignature)return;fillSignature=sig;fillLayer.replaceChildren();
+  const r=plotRect(),line=shownTopology.children.find(o=>o.userData.projection===S.view);
+  const attr=line?.geometry.getAttribute('position'),alpha=shownTopology.userData.alpha ?? 1;
+  const pts=attr ? Array.from({length:attr.count},(_,i)=>screenPoint(new THREE.Vector3(attr.getX(i),attr.getY(i),attr.getZ(i)),camera2)) : [];
+  const sig=JSON.stringify([S.view,r.width,r.height,pts,alpha]);if(sig===fillSignature)return;fillSignature=sig;fillLayer.replaceChildren();
   if(!pts.length)return;
   const polygon=document.createElementNS("http://www.w3.org/2000/svg","polygon");
+  polygon.style.opacity=String(alpha);
   polygon.dataset.axis=S.view;polygon.setAttribute("points",[...pts,[pts.at(-1)[0],0],[pts[0][0],0]].map(p=>p.join(",")).join(" "));
   fillLayer.append(polygon);
 }
@@ -2547,7 +2698,7 @@ function updateLabels() {
   for(const layer of [labelLayer,fillLayer]) {layer.style.left=r.left+"px";layer.style.top=r.top+"px";layer.style.width=r.width+"px";layer.style.height=r.height+"px";layer.setAttribute("viewBox",`0 0 ${r.width} ${r.height}`);}
   if(!world || !hoverState || flight) {labelLayer.replaceChildren();labelSignature="";window.__labelCoverage=null;return;}
   const family=world.rows.filter(m=>familyKey(m)===hoverState.familyKey);
-  const points=family.map(m=>({m,p:screenPoint(toWorld(m))}));
+  const points=family.map(m=>({m,p:screenPoint(displayedPoint(m))}));
   const sig=JSON.stringify([theme,hoverState,r.width,r.height,points.map(p=>p.p)]);if(sig===labelSignature)return;labelSignature=sig;labelLayer.replaceChildren();
   const ns="http://www.w3.org/2000/svg";
   for(const {m,p} of points) {

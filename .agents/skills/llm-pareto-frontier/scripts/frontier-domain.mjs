@@ -1,3 +1,37 @@
+export function delaunay(pts) {
+  const n = pts.length;
+  if (n < 3) return [];
+  const us = pts.map(p => p.u), vs = pts.map(p => p.v);
+  const minU = Math.min(...us), maxU = Math.max(...us), minV = Math.min(...vs), maxV = Math.max(...vs);
+  const dm = Math.max(maxU - minU, maxV - minV);
+  if (!dm) return [];
+  const P = pts.concat([{u:minU-20*dm,v:minV-20*dm}, {u:maxU+20*dm,v:minV-20*dm}, {u:(minU+maxU)/2,v:maxV+20*dm}]);
+  const area = (a,b,c) => (b.u-a.u)*(c.v-a.v)-(b.v-a.v)*(c.u-a.u);
+  const circum = (a,b,c) => {
+    const bu=b.u-a.u, bv=b.v-a.v, cu=c.u-a.u, cv=c.v-a.v;
+    const d=2*(bu*cv-bv*cu);
+    if (d === 0) return null;
+    const b2=bu*bu+bv*bv, c2=cu*cu+cv*cv;
+    const x=a.u+(cv*b2-bv*c2)/d, y=a.v+(bu*c2-cu*b2)/d;
+    return {x,y,r2:(a.u-x)**2+(a.v-y)**2};
+  };
+  let tris = [[n,n+1,n+2]];
+  for (let i=0;i<n;i++) {
+    const p=P[i], bad=[], edges=new Map();
+    for (const t of tris) {
+      const cc=circum(...t.map(k=>P[k]));
+      if (!cc || (p.u-cc.x)**2+(p.v-cc.y)**2 <= cc.r2) bad.push(t);
+    }
+    for (const t of bad) for (const [a,b] of [[t[0],t[1]],[t[1],t[2]],[t[2],t[0]]]) {
+      const k=a<b ? a+'_'+b : b+'_'+a;
+      if (edges.has(k)) edges.delete(k); else edges.set(k,[a,b]);
+    }
+    tris=tris.filter(t=>!bad.includes(t));
+    for (const [a,b] of edges.values()) if (area(P[a],P[b],p) !== 0) tris.push([a,b,i]);
+  }
+  return tris.filter(t=>t.every(k=>k<n) && area(...t.map(k=>P[k])) !== 0);
+}
+
 export function computeFrontier(rows, project) {
   const dominates = (a, b, axes) => axes.every(f => f(a) >= f(b)) && axes.some(f => f(a) > f(b));
   const pareto = axes => rows.filter(b => !rows.some(a => dominates(a, b, axes)));
@@ -8,69 +42,37 @@ export function computeFrontier(rows, project) {
   const front2Cost = pareto([cost, val]);
   const front2Tok = pareto([tok, val]);
   const points = rows.map(row => ({ row, xyz: project(row) }));
-  const positions = [], triangles = [], faces = [];
-  const vertex = xyz => { const index = positions.length / 3; positions.push(...xyz); return index; };
-  const quad = (kind, corners) => {
-    const indices = corners.map(vertex);
-    triangles.push(indices[0], indices[1], indices[2], indices[0], indices[2], indices[3]);
-    faces.push({ kind, corners });
-  };
-  const unique = values => [...new Set(values)].sort((a, b) => a - b);
-  const u = unique([-5, 5, ...points.map(p => p.xyz[0]).filter(x => x > -5 && x < 5)]);
-  const v = unique([-5, 5, ...points.map(p => p.xyz[2]).filter(x => x > -5 && x < 5)]);
-  const height = (x, z) => {
-    const feasible = points.filter(p => p.xyz[0] >= x && p.xyz[2] >= z);
-    return feasible.length ? Math.max(...feasible.map(p => p.xyz[1])) : null;
-  };
-  const cells = u.slice(1).map(x => v.slice(1).map(z => height(x, z)));
-  for (let i = 0; i < u.length - 1; i++) {
-    for (let j = 0; j < v.length - 1; j++) {
-      const x0 = u[i], x1 = u[i + 1], z0 = v[j], z1 = v[j + 1], y = cells[i][j];
-      if (y === null) continue;
-      quad('top', [[x0,y,z0], [x0,y,z1], [x1,y,z1], [x1,y,z0]]);
-      const right = cells[i + 1]?.[j] ?? null;
-      if (right !== null && y !== right) quad('step', [[x1,right,z0], [x1,y,z0], [x1,y,z1], [x1,right,z1]]);
-      const above = cells[i][j + 1] ?? null;
-      if (above !== null && y !== above) quad('step', [[x0,above,z1], [x1,above,z1], [x1,y,z1], [x0,y,z1]]);
-    }
+  const pointOf = row => points.find(p => p.row === row);
+  const slots = new Map();
+  for (const row of front3) {
+    const p=pointOf(row), key=JSON.stringify([p.xyz[0],p.xyz[2]]);
+    if (!slots.has(key) || slots.get(key).row.val < row.val) slots.set(key,p);
   }
-  const onFace = (xyz, { corners }) => [0,1,2].every(axis => {
-    const coordinates = corners.map(c => c[axis]);
-    return xyz[axis] >= Math.min(...coordinates) && xyz[axis] <= Math.max(...coordinates);
-  });
-  const interior4D = front4.filter(row => !front3.includes(row));
-  const coverage = Object.fromEntries(points.map(({ row, xyz }) => {
-    const inBounds = xyz[0] >= -5 && xyz[0] <= 5 && xyz[2] >= -5 && xyz[2] <= 5;
-    const envelopeBoundary = inBounds && xyz[1] === height(xyz[0], xyz[2]);
-    const face = faces.find(face => face.kind === 'top' && onFace(xyz, face))
-      ?? faces.find(face => face.kind === 'step' && onFace(xyz, face));
-    const boundaryPoint = !face && envelopeBoundary && front3.includes(row) && (xyz[0] === -5 || xyz[2] === -5);
-    if (boundaryPoint) vertex(xyz);
-    const classification = face?.kind ?? (boundaryPoint ? 'top' : 'interior');
-    const boundary = classification === 'top' || classification === 'step';
-    return [row.id, {
-      point: [...xyz],
-      aliases: points.filter(p => p.xyz.every((x, axis) => x === xyz[axis])).map(p => p.row.id),
-      boundary,
-      classification,
-      boundaryPoint,
-      front3: front3.includes(row),
-      front4: front4.includes(row),
-      reason: interior4D.includes(row) ? 'speed preserves full 4D nondomination; dominated in the displayed three axes' : boundary ? 'displayed envelope boundary' : 'dominated in the displayed three axes'
-    }];
-  }));
-  const staircase = axis => {
-    const xs = unique(points.map(p => p.xyz[axis]).filter(x => x >= -5 && x <= 5));
-    if (!xs.length) return [];
-    const boundary = [];
-    let left = -5;
-    for (const x of xs) {
-      const y = Math.max(...points.filter(p => p.xyz[axis] >= x).map(p => p.xyz[1]));
-      if (!boundary.length || boundary.at(-1)[1] !== y) boundary.push([left, y]);
-      if (boundary.at(-1)[0] !== x) boundary.push([x, y]);
-      left = x;
-    }
-    return boundary;
+  const vertices=[...slots.values()];
+  const tris=delaunay(vertices.map(p=>({u:p.xyz[0],v:p.xyz[2]})));
+  const edgeCounts=new Map();
+  for (const t of tris) for (const [a,b] of [[t[0],t[1]],[t[1],t[2]],[t[2],t[0]]]) {
+    const key=a<b ? a+'_'+b : b+'_'+a;
+    const edge=edgeCounts.get(key) || {indices:[a,b],count:0};
+    edge.count++; edgeCounts.set(key,edge);
+  }
+  let edges=[...edgeCounts.values()].filter(e=>e.count===1).map(e=>e.indices);
+  if (!tris.length) {
+    const order=vertices.map((_,i)=>i).sort((a,b)=>vertices[a].xyz[0]-vertices[b].xyz[0] || vertices[a].xyz[2]-vertices[b].xyz[2]);
+    edges=order.slice(1).map((i,k)=>[order[k],i]);
+  }
+  const direct = (front,axis) => {
+    const sorted=front.map(pointOf).sort((a,b)=>a.xyz[axis]-b.xyz[axis] || a.xyz[1]-b.xyz[1]);
+    return sorted.filter((p,i)=>!i || p.xyz[axis]!==sorted[i-1].xyz[axis] || p.xyz[1]!==sorted[i-1].xyz[1]).map(p=>[p.xyz[axis],p.xyz[1]]);
   };
-  return { front4, front3, front2Cost, front2Tok, surface: { positions, triangles, faces }, interior4D, coverage, stairs: { cost: staircase(0), tok: staircase(2) } };
+  const interior4D = front4.filter(row => !front3.includes(row));
+  const coverage = Object.fromEntries(points.map(({row,xyz})=>[row.id, {
+    point:[...xyz], aliases:points.filter(p=>p.xyz.every((x,i)=>x===xyz[i])).map(p=>p.row.id),
+    front3:front3.includes(row), front4:front4.includes(row),
+    geometryVertex:vertices.some(p=>p.xyz.every((x,i)=>x===xyz[i])),
+    reason:interior4D.includes(row) ? 'speed preserves full 4D nondomination; dominated in the displayed three axes' : front3.includes(row) ? 'observed three-axis frontier vertex; interpolation is a visual guide' : 'dominated in the displayed three axes'
+  }]));
+  return {front4,front3,front2Cost,front2Tok,interior4D,coverage,
+    surface:{positions:vertices.flatMap(p=>p.xyz),triangles:tris.flat(),edges,vertexIds:vertices.map(p=>p.row.id)},
+    lines:{cost:direct(front2Cost,0),tok:direct(front2Tok,2)}};
 }

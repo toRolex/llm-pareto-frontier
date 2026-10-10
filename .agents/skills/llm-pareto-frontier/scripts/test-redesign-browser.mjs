@@ -17,11 +17,11 @@ let original, deniedPage, preload;
 const check = (name, evidence) => report.checks.push({ name, evidence });
 const ready = async p => {
   await p.waitForFunction(() => typeof world !== 'undefined' && world && typeof labelLayer !== 'undefined');
-  await p.waitForFunction(() => !flight);
+  await p.waitForFunction(() => !flight && (!Motion || sampleMotion(Motion, performance.now()).done));
 };
 const settle = async () => {
   // 2D 场景必须等到标签层按当前视口重算（flight 期间签名被清空，落地后才重建）
-  await page.waitForFunction(() => !flight);
+  await page.waitForFunction(() => !flight && (!Motion || sampleMotion(Motion, performance.now()).done));
   await page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
 };
 
@@ -54,16 +54,11 @@ const inspect = () => page.evaluate(() => {
     normalize(m.tok, DOM.tokMax, DOM.tokMin, S.tokScale, rows.map(m => m.tok)) * W.h];
   const pointFailures = world.sprites.filter(sp => !sp.position.toArray().every((v, i) => close(v, position(sp.userData.model)[i])))
     .map(sp => sp.userData.model.model);
-  const coordinates = rows.map(position), component = axis === 'cost' ? 0 : 2;
-  const xs = [...new Set(coordinates.map(p => p[component]))].sort((a, b) => a - b);
-  const stairs = [];
-  let left = 0;
-  for (const x of xs) {
-    const y = Math.max(...coordinates.filter(p => p[component] >= x).map(p => p[1]));
-    if (!stairs.length || stairs.at(-1)[1] !== y) stairs.push([left, y]);
-    if (stairs.at(-1)[0] !== x) stairs.push([x, y]);
-    left = x;
-  }
+  const component = axis === 'cost' ? 0 : 2;
+  const axisValue=m=>axis === 'cost' ? costOf(m) : m.tok;
+  const frontier=rows.filter(a=>!rows.some(b=>axisValue(b)<=axisValue(a) && b.val>=a.val && (axisValue(b)<axisValue(a) || b.val>a.val)));
+  const sorted=frontier.map(position).map(p=>[p[component],p[1]]).sort((a,b)=>a[0]-b[0] || a[1]-b[1]);
+  const stairs=sorted.filter((p,i)=>!i || p[0]!==sorted[i-1][0] || p[1]!==sorted[i-1][1]);
   const expectedLine = stairs.flatMap(([x, y]) => axis === 'cost' ? [x, y, -0.02] : [-0.02, y, x]);
   const actualLine = Array.from(world.frontLines[axis][0].geometry.attributes.position.array);
   const lineMatches = actualLine.length === expectedLine.length && actualLine.every((v, i) => close(v, expectedLine[i]));
@@ -197,22 +192,13 @@ try {
       fixtures.forEach(m => selected.set(baseKey(m.model), new Set([effortOf(m.model)])));
       S.metric = 0; S.perTask = false; S.subscriptionPlans = {}; S.view = 'cost';
       for (const mode of ['in', 'out']) {
-        S.priceMode = mode; rebuild(); applyView('cost', true);
+        S.priceMode = mode; rebuild(); applyView('cost', true); sampleDataMotion(performance.now() + MOTION_MS);
         const members = world.rows.filter(a => !world.rows.some(b => b !== a && costOf(b) <= costOf(a) && b.val >= a.val && (costOf(b) < costOf(a) || b.val > a.val)))
           .sort((a, b) => costOf(a) - costOf(b));
         snapshots.push({ mode, sorted: [...world.rows].sort((a, b) => costOf(a) - costOf(b)).map(m => m.model), members: members.map(m => m.model),
           line: Array.from(world.frontLines.cost[0].geometry.attributes.position.array),
           expectedLine: (() => {
-            const coords = world.rows.map(m => toWorld(m).toArray());
-            const xs = [...new Set(coords.map(p => p[0]))].sort((a,b) => a-b), out = [];
-            let left = 0;
-            for (const x of xs) {
-              const y = Math.max(...coords.filter(p => p[0] >= x).map(p => p[1]));
-              if (!out.length || out.at(-1)[1] !== y) out.push([left,y]);
-              if (out.at(-1)[0] !== x) out.push([x,y]);
-              left = x;
-            }
-            return out.flatMap(([x,y]) => [x,y,-0.02]);
+            return members.map(m => toWorld(m).toArray()).sort((a,b) => a[0]-b[0]).flatMap(([x,y]) => [x,y,-0.02]);
           })(),
           labels: [...labelLayer.querySelectorAll('g[data-front="true"]')].map(g => g.dataset.model).sort() });
       }
