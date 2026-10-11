@@ -236,7 +236,7 @@ for (const [key, file] of Object.entries(LOGO_SOURCES)) {
 html = html.replace(/const LOGOS = \{.*?\};\n/s, `const LOGOS = ${JSON.stringify(logos)};\n`);
 
 const pricingMarker = '// SUBSCRIPTION_PRICING_RUNTIME';
-const pricingRuntime = `${pricingMarker}\n${pricingSource.replace(/^export /gm, '')}\nwindow.MKL_PRICING = { DEFAULT_MIX, SUBSCRIPTION_REGISTRY, createPricingEngine, validateMix, cacheWriteQuote };\n`;
+const pricingRuntime = `${pricingMarker}\n${pricingSource.replace(/^export /gm, '')}\nwindow.MKL_PRICING = { DEFAULT_MIX, SUBSCRIPTION_REGISTRY, createPricingEngine, validateMix, cacheWriteQuote, channelBars, resolveSelection, normalizeSelections };\n`;
 if (html.includes(pricingMarker)) html = html.replace(/\/\/ SUBSCRIPTION_PRICING_RUNTIME[\s\S]*?\/\/ END_SUBSCRIPTION_PRICING_RUNTIME\n/, `${pricingRuntime}// END_SUBSCRIPTION_PRICING_RUNTIME\n`);
 else html = html.replace('const LOGOS = ', `${pricingRuntime}// END_SUBSCRIPTION_PRICING_RUNTIME\nconst LOGOS = `);
 

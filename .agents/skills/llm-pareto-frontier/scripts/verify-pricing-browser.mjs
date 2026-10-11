@@ -7,6 +7,9 @@ const dir = '/tmp/mkl-subscription-evidence';
 await fs.mkdir(dir, { recursive: true });
 const state = async () => {
   await page.waitForFunction(() => !flight && (!Motion || sampleMotion(Motion, performance.now()).done));
+  // motion.done can flip true on a poll without an intervening rAF frame, so sample sprites
+  // only after one more rendered frame lands at the settled target (same settle as test-redesign).
+  await page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
   return page.evaluate(() => ({
   mix: S.mix, plans: S.subscriptionPlans, mode: S.priceMode, view: S.view, perTask: S.perTask,
   errors: window.__errs2, requests: performance.getEntriesByType('resource').map(x => x.name),
@@ -18,8 +21,10 @@ const state = async () => {
 }));
 };
 const records = [];
+const openMix = () => page.evaluate(() => { const d = document.getElementById('mix-details'); if (d) d.open = true; });
 await page.goto(process.env.MKL_BROWSER_URL || 'file:///Users/rolex/Documents/Codes/githubProject/MyProject/llm-pareto-frontier/.agents/skills/llm-pareto-frontier/prototype-4d-3d.html');
 await page.click('text="订阅价格"');
+await openMix();
 await page.click('#plans-api');
 await page.click('#mix-defaults');
 const initial = await state();
@@ -29,6 +34,7 @@ assert.ok(Math.abs(initial.sol / plan.sol - 10.4) < 1e-9);
 assert.notDeepEqual(plan.positions,initial.positions);
 assert.notDeepEqual(plan.front,initial.front);
 records.push({ stage: 'OpenAI Pro200 changes positions and 4D front', initial, plan });
+await openMix();
 await page.fill('#mix-input','1');
 const invalid = await state();
 assert.deepEqual(invalid.mix,{input:0.4,cacheRead:96.7,cacheWrite:2.6,output:0.3});
@@ -43,6 +49,7 @@ const reload = await state();
 assert.deepEqual(reload.plans,{OpenAI:'pro200'});
 assert.deepEqual(reload.mix,valid.mix);
 await page.click('text="订阅价格"');
+await openMix();
 await page.click('#mix-defaults');
 assert.deepEqual((await state()).plans,{OpenAI:'pro200'});
 await page.fill('#mix-input','1');
@@ -76,6 +83,7 @@ await page.click('text="3D"'); assert.equal((await state()).view,'3d');
 await page.click('text="$/task"');
 await page.click('text="Index"');
 await page.click('text="订阅价格"');
+await openMix();
 await page.click('#mix-defaults');
 await page.click('button[data-provider-button="Anthropic"][data-plan="max20x200"]');
 await page.screenshot({path:`${dir}/pricing-3d.png`});

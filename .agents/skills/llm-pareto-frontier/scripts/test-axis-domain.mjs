@@ -32,5 +32,17 @@ if (baseline) {
   const html = readFileSync(new URL('../prototype-4d-3d.html', import.meta.url), 'utf8');
   const runtime = html.match(/\/\/ AXIS_DOMAIN_RUNTIME\n([\s\S]*?)\/\/ END_AXIS_DOMAIN_RUNTIME/)[1];
   assert.equal(vm.runInNewContext(`${runtime}\ncreateAxisDomain([10,20]).project(10)`), createAxisDomain([10,20]).project(10));
-  console.log('PASS retained range, margin, zero-safe log, singleton, empty, invalid values, embedded artifact parity');
+  const ticks = html.slice(html.indexOf('  const linTicks ='), html.indexOf('  for (const v of costTicks)'));
+  for (const values of [[], [0], [100, 200]]) for (const scale of ['lin', 'log']) {
+    const axis = createAxisDomain(values, scale);
+    const actual = vm.runInNewContext(`${ticks}\n({costTicks,tokTicks})`, {
+      DOM: { costMin: axis.min, costMax: axis.max, tokMin: axis.min, tokMax: axis.max },
+      S: { costScale: scale, tokScale: scale },
+    }, { timeout: 100 });
+    assert.deepEqual(Array.from(actual.tokTicks), Array.from(actual.costTicks), 'token and cost ticks share zero-safe domain behavior');
+    assert.ok(actual.tokTicks.length > 0 && actual.tokTicks.every(Number.isFinite));
+    if (!values.length && scale === 'log') assert.deepEqual(Array.from(actual.tokTicks), [0, 0.2, 0.4, 0.6, 0.8, 1]);
+    if (values.length === 2 && scale === 'log') assert.deepEqual(Array.from(actual.tokTicks), [100, 200]);
+  }
+  console.log('PASS retained range, margin, zero-safe log, singleton, empty, invalid values, embedded artifact parity, actual buildWorld ticks terminate');
 }
