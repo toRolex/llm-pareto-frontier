@@ -62,7 +62,9 @@ const oracle = (points, axes) => points.filter(a => !points.some(b => axes.every
 const dimensions = [['cost', -1], ['tok', -1], ['val', 1], ['speed', 1]];
 function verifyFrontier(s) {
   const rows = s.points.map(p => ({ ...p, speed: p.speed ?? -Infinity }));
-  assert.deepEqual([...s.front].sort(), oracle(rows, dimensions), 'full P4 must not be intersected with P2');
+  const displayedAxes = s.view === '3d' ? dimensions.slice(0, 3) : [[s.view === 'cost' ? 'cost' : 'tok', -1], ['val', 1]];
+  assert.deepEqual([...s.front].sort(), oracle(rows, displayedAxes), 'rings match current displayed-axis Pareto');
+  assert.deepEqual(s.frontier.front4.map(p => p.id).sort(), oracle(rows, dimensions), 'domain preserves full P4 separately');
   assert.ok(s.frontier, 'world.frontier must expose surface and coverage');
   const p3 = oracle(rows, dimensions.slice(0, 3));
   const surface = s.frontier.surface;
@@ -88,7 +90,7 @@ function verifyFrontier(s) {
     const edgeVertex = Array.from({length:surface.positions.length/3}, (_,i) => vertex(i)).some(v => v.every((x,i) => close(x,p.xyz[i])));
     assert.ok(hit || edgeVertex, `${id} independently covered by actual surface geometry`);
   }
-  record(`P4/P3 metric ${s.metric} ${s.price}`, { expectedP4: oracle(rows,dimensions), actualP4:s.front, p3 });
+  record(`P4/P3 metric ${s.metric} ${s.price}`, { expectedP4: oracle(rows,dimensions), actualP4:s.frontier.front4.map(p => p.id), currentView:s.front, p3 });
 }
 const rowsFor2D = s => s.points.map(p=>({...p,speed:p.speed ?? -Infinity}));
 function verify2D(s) {

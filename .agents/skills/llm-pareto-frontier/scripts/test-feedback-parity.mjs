@@ -15,4 +15,17 @@ const rowBuilder=script.match(/const rows = valid\.map\(m => \(\{[^\n]+\}\)\);/)
 const built=vm.runInNewContext(`${rowBuilder}\nrows`,{valid:[{creator:'C',model:'A',raw:123.5}],mi:{get:m=>m.raw}});
 assert.equal(built[0].val,123.5,'buildWorld rows retain absolute metric');
 assert.ok(script.includes('frontier.lines[axis]') && script.includes("line?.geometry.getAttribute('position')"),'line and fill consume same sampled direct geometry');
-console.log('PASS inline/template parity, runtime syntax, full P4, absolute rows, shared line/fill source');
+const selectFront=script.match(/  const front = [^\n]+;\n  const frontSet = new Set\(front\);/)[0];
+const displayedRows=[
+  {id:'A',cost:1,tok:3,val:3,speed:3},
+  {id:'B',cost:2,tok:3,val:2,speed:9},
+  {id:'C',cost:3,tok:1,val:3,speed:3},
+  {id:'tie',cost:1,tok:3,val:3,speed:1},
+].map(r=>({...r,src:{id:r.id}}));
+for(const [view,expected] of [['3d',['A','C','tie']],['cost',['A','tie']],['tok',['C']]]) {
+  const actual=vm.runInNewContext(`${runtime}\nconst frontier=computeFrontier(rows,r=>[r.cost,r.val,r.tok]);\n${selectFront}\n[...frontSet].map(r=>r.id)`,{rows:displayedRows,S:{view}});
+  assert.deepEqual(Array.from(actual),expected,`${view} buildWorld selection excludes speed-only B and preserves ties`);
+  const empty=vm.runInNewContext(`${runtime}\nconst frontier=computeFrontier([],r=>[]);\n${selectFront}\nfront.length`,{S:{view}});
+  assert.equal(empty,0,`${view} empty selection`);
+}
+console.log('PASS inline/template parity, runtime syntax, domain P4, current-view rings and ties/empty, absolute rows, shared line/fill source');
